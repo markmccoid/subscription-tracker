@@ -3,9 +3,9 @@
  * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://reactnativeunistyles.vercel.app), etc.
  */
 
-import '@/global.css';
-
 import { Platform } from 'react-native';
+
+import { accentForeground, DEFAULT_ACCENT_COLOR } from '@/appearance/appearance';
 
 export const Colors = {
   light: {
@@ -14,6 +14,8 @@ export const Colors = {
     backgroundElement: '#F0F0F3',
     backgroundSelected: '#E0E1E6',
     textSecondary: '#60646C',
+    border: '#D8D9DF',
+    danger: '#C62828',
   },
   dark: {
     text: '#ffffff',
@@ -21,10 +23,29 @@ export const Colors = {
     backgroundElement: '#212225',
     backgroundSelected: '#2E3135',
     textSecondary: '#B0B4BA',
+    border: '#3A3D45',
+    danger: '#FF6B6B',
   },
 } as const;
 
 export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
+
+export type AppTheme = (typeof Colors)[keyof typeof Colors] & {
+  readonly scheme: 'light' | 'dark';
+  readonly accent: string;
+  readonly accentForeground: '#000000' | '#FFFFFF';
+  readonly accentMuted: string;
+};
+
+export function createAppTheme(scheme: 'light' | 'dark', accent = DEFAULT_ACCENT_COLOR): AppTheme {
+  return {
+    ...Colors[scheme],
+    scheme,
+    accent,
+    accentForeground: accentForeground(accent),
+    accentMuted: `${accent}22`,
+  };
+}
 
 export const Fonts = Platform.select({
   ios: {

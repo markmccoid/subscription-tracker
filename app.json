@@ -3,12 +3,14 @@
     "name": "subscription-tracker",
     "slug": "subscription-tracker",
     "version": "1.0.0",
+    "platforms": ["ios"],
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/subscription-tracker-icon.png",
     "scheme": "subscriptiontracker",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/subscription-tracker-icon.png",
+      "bundleIdentifier": "com.markmccoid.subscription-tracker"
     },
     "android": {
       "adaptiveIcon": {
@@ -21,18 +23,22 @@
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/subscription-tracker-icon.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "backgroundColor": "#F59A0A",
+          "image": "./assets/subscription-tracker-splash.png",
+          "enableFullScreenImage_legacy": true,
+          "resizeMode": "cover"
         }
-      ]
+      ],
+      "expo-sqlite",
+      "expo-notifications",
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true,

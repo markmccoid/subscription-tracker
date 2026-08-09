@@ -3,12 +3,16 @@
  * https://docs.expo.dev/guides/color-schemes/
  */
 
-import { Colors } from '@/constants/theme';
+import { createAppTheme } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useAppearanceStore } from '@/stores/appearance-store';
 
 export function useTheme() {
-  const scheme = useColorScheme();
-  const theme = scheme === 'unspecified' ? 'light' : scheme;
+  const systemScheme = useColorScheme();
+  const accentColor = useAppearanceStore((state) => state.accentColor);
+  const themeMode = useAppearanceStore((state) => state.themeMode);
+  const scheme = themeMode === 'system' ? systemScheme : themeMode;
+  const resolvedScheme = scheme === 'dark' ? 'dark' : 'light';
 
-  return Colors[theme];
+  return createAppTheme(resolvedScheme, accentColor);
 }

@@ -1,0 +1,150 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { SQLiteHouseholdRepository } from '../../src/data/sqlite/sqlite-household-repository.ts';
+import { migrateDatabase } from '../../src/data/sqlite/schema.ts';
+import { createStandardSubscription } from '../../src/domain/create-subscription.ts';
+import { createPayment } from '../../src/domain/occurrence-resolution.ts';
+import { calendarDate, cents, entityId, utcTimestamp } from '../../src/domain/primitives.ts';
+
+const ids = {
+  household: entityId('10000000-0000-4000-8000-000000000001'),
+  subscription: entityId('10000000-0000-4000-8000-000000000002'),
+  occurrence: entityId('10000000-0000-4000-8000-000000000003'),
+  payment: entityId('10000000-0000-4000-8000-000000000004'),
+};
+
+class FakeDatabase {
+  calls = [];
+  transactionCount = 0;
+  userVersion = 0;
+
+  async execAsync(sql) {
+    this.calls.push({ method: 'exec', sql, transaction: false });
+  }
+
+  async getFirstAsync(sql) {
+    this.calls.push({ method: 'first', sql, transaction: false });
+    if (sql === 'PRAGMA user_version') return { user_version: this.userVersion };
+    return null;
+  }
+
+  async getAllAsync(sql) {
+    this.calls.push({ method: 'all', sql, transaction: false });
+    return [];
+  }
+
+  async runAsync(sql, ...args) {
+    this.calls.push({ method: 'run', sql, args, transaction: false });
+  }
+
+  async withExclusiveTransactionAsync(callback) {
+    this.transactionCount += 1;
+    const transaction = {
+      execAsync: async (sql) => {
+        this.calls.push({ method: 'exec', sql, transaction: true });
+      },
+      runAsync: async (sql, ...args) => {
+        this.calls.push({ method: 'run', sql, args, transaction: true });
+        return { changes: 1 };
+      },
+    };
+    await callback(transaction);
+  }
+}
+
+test('schema migration creates case-insensitive Payment Method uniqueness and reaches version two', async () => {
+  const database = new FakeDatabase();
+  await migrateDatabase(database);
+  const transactionSql = database.calls.filter((call) => call.transaction).map((call) => call.sql).join('\n');
+  assert.match(transactionSql, /CREATE TABLE payment_methods/);
+  assert.match(transactionSql, /CREATE UNIQUE INDEX payment_methods_name_unique_idx/);
+  assert.match(transactionSql, /PRAGMA user_version = 2/);
+  assert.equal(database.transactionCount, 1);
+});
+
+test('Subscription upsert, occurrence retention, and reminder marker share one transaction', async () => {
+  const database = new FakeDatabase();
+  const repository = new SQLiteHouseholdRepository(database);
+  const subscription = createStandardSubscription({
+    id: ids.subscription,
+    householdListId: ids.household,
+    name: 'Example',
+    amountCents: 1200,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-08-09',
+    now: '2026-08-09T15:00:00.000Z',
+  });
+  await repository.saveSubscriptionWithOccurrences(subscription, [{
+    id: ids.occurrence,
+    subscriptionId: ids.subscription,
+    billingDate: calendarDate('2026-08-09'),
+    expectedAmount: cents(1200),
+    createdAt: utcTimestamp('2026-08-09T15:00:00.000Z'),
+  }]);
+
+  const transactionRuns = database.calls.filter((call) => call.method === 'run' && call.transaction);
+  assert.equal(database.transactionCount, 1);
+  assert.equal(transactionRuns.length, 3);
+  assert.match(transactionRuns[0].sql, /INSERT INTO subscriptions/);
+  assert.match(transactionRuns[1].sql, /INSERT OR IGNORE INTO billing_occurrences/);
+  assert.match(transactionRuns[2].sql, /reminderReconciliationNeeded/);
+});
+
+test('retaining a projected occurrence and recording its Payment share one transaction', async () => {
+  const database = new FakeDatabase();
+  const repository = new SQLiteHouseholdRepository(database);
+  const occurrence = {
+    id: ids.occurrence,
+    subscriptionId: ids.subscription,
+    billingDate: calendarDate('2026-09-09'),
+    expectedAmount: cents(1200),
+    createdAt: utcTimestamp('2026-08-09T15:00:00.000Z'),
+  };
+  const payment = createPayment({
+    id: ids.payment,
+    billingOccurrenceId: ids.occurrence,
+    amountCents: 1100,
+    paymentDate: '2026-09-08',
+    now: '2026-08-09T15:00:00.000Z',
+  });
+
+  await repository.saveOccurrenceResolution(occurrence, payment);
+
+  const transactionRuns = database.calls.filter((call) => call.method === 'run' && call.transaction);
+  assert.equal(database.transactionCount, 1);
+  assert.equal(transactionRuns.length, 2);
+  assert.match(transactionRuns[0].sql, /INSERT OR IGNORE INTO billing_occurrences/);
+  assert.match(transactionRuns[1].sql, /INSERT INTO payments/);
+});
+
+test('Payment Method deletion clears Subscription and Payment references atomically', async () => {
+  const database = new FakeDatabase();
+  const repository = new SQLiteHouseholdRepository(database);
+
+  await repository.deletePaymentMethod(entityId('10000000-0000-4000-8000-000000000005'));
+
+  const transactionRuns = database.calls.filter((call) => call.method === 'run' && call.transaction);
+  assert.equal(database.transactionCount, 1);
+  assert.equal(transactionRuns.length, 3);
+  assert.match(transactionRuns[0].sql, /UPDATE subscriptions SET default_payment_method_id = NULL/);
+  assert.match(transactionRuns[1].sql, /UPDATE payments SET payment_method_id = NULL/);
+  assert.match(transactionRuns[2].sql, /DELETE FROM payment_methods/);
+});
+
+test('Payment Method persistence upserts editable and retirement fields', async () => {
+  const database = new FakeDatabase();
+  const repository = new SQLiteHouseholdRepository(database);
+  await repository.savePaymentMethod({
+    id: entityId('10000000-0000-4000-8000-000000000005'),
+    householdListId: ids.household,
+    name: 'Household Visa',
+    note: 'Primary',
+    retiredAt: null,
+    createdAt: utcTimestamp('2026-08-09T15:00:00.000Z'),
+    updatedAt: utcTimestamp('2026-08-09T15:00:00.000Z'),
+  });
+  const run = database.calls.find((call) => call.method === 'run' && !call.transaction);
+  assert.match(run.sql, /ON CONFLICT\(id\) DO UPDATE SET/);
+  assert.match(run.sql, /retired_at=excluded.retired_at/);
+});
