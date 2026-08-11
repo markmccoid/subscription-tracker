@@ -100,7 +100,7 @@ export function updateStandardSubscription(
 
   const normalized = {
     name: nonBlank(input.name, 'Subscription name'),
-    category: input.category,
+    categoryId: input.categoryId,
     note: normalizeOptionalText(input.note, 'Subscription note', 2000),
     cancellationUrl: normalizeOptionalHttpsUrl(input.cancellationUrl),
     defaultPaymentMethodId: input.defaultPaymentMethodId,

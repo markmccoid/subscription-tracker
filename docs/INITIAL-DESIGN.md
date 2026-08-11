@@ -49,7 +49,7 @@ It has exactly one Pricing Arrangement:
 - Trial: Trial Conversion Date plus Standard Amount; the conversion date equals the schedule start
 - Promotion: Promotional Amount until Promotion End Date, then Standard Amount; the end date is a Billing Date
 
-Lifecycle is independent of pricing: Active, Paused, Cancellation Pending, or Canceled. Archive visibility is separate and valid only for Canceled Subscriptions.
+Lifecycle is independent of pricing: Active, Paused, or Canceled. Archive visibility is separate and valid only for Canceled Subscriptions.
 
 ## Persistence
 

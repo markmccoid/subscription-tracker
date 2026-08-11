@@ -10,6 +10,7 @@ const ids = [
   '10000000-0000-4000-8000-000000000003',
   '10000000-0000-4000-8000-000000000004',
 ];
+const softwareCategoryId = '20000000-0000-4000-8000-000000000006';
 
 test('initialization, creation, projection, and due reconciliation cross one repository seam', async () => {
   const repository = new InMemoryHouseholdRepository();
@@ -27,7 +28,7 @@ test('initialization, creation, projection, and due reconciliation cross one rep
     cycle: 'monthly',
     scheduleStartDate: '2026-08-09',
     anchorDay: 9,
-    category: 'software',
+    categoryId: softwareCategoryId,
   });
 
   const dashboard = await tracker.loadDashboard();
@@ -49,7 +50,8 @@ test('initialization, creation, projection, and due reconciliation cross one rep
     {
       id: ids[1],
       name: 'Example Monthly',
-      category: 'software',
+      categoryId: softwareCategoryId,
+      category: 'Software',
       lifecycle: 'active',
       amountCents: 1299,
       cycle: 'monthly',
@@ -64,6 +66,47 @@ test('initialization, creation, projection, and due reconciliation cross one rep
   const snapshot = await repository.loadSnapshot();
   assert.equal(snapshot.billingOccurrences.length, 1);
   assert.equal(snapshot.billingOccurrences[0].billingDate, '2026-08-09');
+});
+
+test('notification settings default to five days and produce one future reminder per eligible Subscription', async () => {
+  const repository = new InMemoryHouseholdRepository();
+  let idSequence = 1;
+  const tracker = new SubscriptionTracker({
+    repository,
+    createId: () => `15000000-0000-4000-8000-${String(idSequence++).padStart(12, '0')}`,
+    now: () => new Date(2026, 7, 9, 8, 0, 0),
+  });
+
+  await tracker.initialize();
+  assert.deepEqual(await tracker.loadNotificationSettings(), {
+    defaultReminderLeadDays: 5,
+    reminderTime: '09:00',
+  });
+  await tracker.addStandardSubscription({
+    name: 'Included',
+    amountCents: 1299,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-08-20',
+  });
+  await tracker.addStandardSubscription({
+    name: 'Muted',
+    amountCents: 999,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-08-21',
+    notificationsMuted: true,
+  });
+
+  const [plan] = await tracker.loadBillingReminderPlans();
+  assert.equal(plan.subscriptionName, 'Included');
+  assert.equal(plan.billingDate, '2026-08-20');
+  assert.deepEqual(
+    [plan.triggerDate.getFullYear(), plan.triggerDate.getMonth() + 1, plan.triggerDate.getDate(), plan.triggerDate.getHours()],
+    [2026, 8, 15, 9],
+  );
+
+  await tracker.updateDefaultReminderLeadDays(7);
+  assert.equal((await tracker.loadNotificationSettings()).defaultReminderLeadDays, 7);
+  await assert.rejects(() => tracker.updateDefaultReminderLeadDays(366), /whole number from 0 to 365/);
 });
 
 test('groups unresolved and future Billing Occurrences by the Upcoming time horizons', async () => {
@@ -223,4 +266,109 @@ test('records mutually exclusive Payment and No Charge resolutions and removes t
       .flatMap((group) => group.charges)
       .every((charge) => charge.billingDate.startsWith('2026-09')),
   );
+});
+
+test('cancellation resolves backdated uncharged occurrences and removes every future projection', async () => {
+  const repository = new InMemoryHouseholdRepository();
+  let idSequence = 1;
+  let now = new Date('2026-08-09T15:00:00.000Z');
+  const tracker = new SubscriptionTracker({
+    repository,
+    createId: () => `30000000-0000-4000-8000-${String(idSequence++).padStart(12, '0')}`,
+    now: () => now,
+  });
+
+  await tracker.initialize();
+  const added = await tracker.addStandardSubscription({
+    name: 'Late Cancellation',
+    amountCents: 1299,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-08-09',
+    cancellationUrl: 'https://example.com/cancel',
+  });
+  assert.equal(added.status, 'saved');
+  await tracker.recordPayment({
+    subscriptionId: added.subscriptionId,
+    billingDate: '2026-08-09',
+    amountCents: 1299,
+    paymentDate: '2026-08-09',
+  });
+
+  now = new Date('2026-10-09T15:00:00.000Z');
+  await tracker.initialize();
+  const preview = await tracker.loadCancellationPreview(added.subscriptionId, '2026-09-01');
+  assert.deepEqual(preview.affectedOccurrences, [
+    { billingDate: '2026-09-09', expectedAmountCents: 1299 },
+    { billingDate: '2026-10-09', expectedAmountCents: 1299 },
+  ]);
+
+  await tracker.cancelSubscription({
+    subscriptionId: added.subscriptionId,
+    confirmationDate: '2026-09-01',
+    accessEndDate: '2026-10-31',
+  });
+
+  const snapshot = await repository.loadSnapshot();
+  assert.equal(snapshot.payments.length, 1);
+  assert.equal(snapshot.chargeExceptions.length, 2);
+  assert.ok(snapshot.chargeExceptions.every((item) => item.reason === 'Subscription canceled before charge'));
+  const detail = await tracker.loadSubscriptionDetail(added.subscriptionId);
+  assert.deepEqual(detail.lifecycle, {
+    status: 'canceled',
+    cancellationConfirmationDate: '2026-09-01',
+    accessEndDate: '2026-10-31',
+  });
+  assert.equal(detail.nextBillingDate, null);
+  assert.equal((await tracker.loadBillingReminderPlans()).length, 0);
+  const dashboard = await tracker.loadDashboard();
+  assert.equal(dashboard.monthlyCommitmentCents, 0);
+  assert.equal(dashboard.dueNext30DaysCents, 0);
+  assert.deepEqual(dashboard.upcomingChargeGroups, []);
+});
+
+test('cancellation details can be corrected and reactivation starts a new schedule without rewriting history', async () => {
+  const repository = new InMemoryHouseholdRepository();
+  let idSequence = 1;
+  let now = new Date('2026-08-09T15:00:00.000Z');
+  const tracker = new SubscriptionTracker({
+    repository,
+    createId: () => `40000000-0000-4000-8000-${String(idSequence++).padStart(12, '0')}`,
+    now: () => now,
+  });
+  await tracker.initialize();
+  const added = await tracker.addStandardSubscription({
+    name: 'Return Later',
+    amountCents: 900,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-08-09',
+  });
+  assert.equal(added.status, 'saved');
+  await tracker.cancelSubscription({
+    subscriptionId: added.subscriptionId,
+    confirmationDate: '2026-08-09',
+  });
+  const exceptionsBefore = (await repository.loadSnapshot()).chargeExceptions;
+
+  await tracker.editCancellationDetails({
+    subscriptionId: added.subscriptionId,
+    confirmationDate: '2026-08-08',
+    accessEndDate: '2026-08-31',
+  });
+  assert.deepEqual((await tracker.loadSubscriptionDetail(added.subscriptionId)).lifecycle, {
+    status: 'canceled',
+    cancellationConfirmationDate: '2026-08-08',
+    accessEndDate: '2026-08-31',
+  });
+  assert.deepEqual((await repository.loadSnapshot()).chargeExceptions, exceptionsBefore);
+
+  now = new Date('2026-08-10T15:00:00.000Z');
+  await tracker.reactivateSubscription({
+    subscriptionId: added.subscriptionId,
+    nextBillingDate: '2026-09-15',
+  });
+  const reactivated = await tracker.loadSubscriptionDetail(added.subscriptionId);
+  assert.equal(reactivated.lifecycle.status, 'active');
+  assert.equal(reactivated.nextBillingDate, '2026-09-15');
+  assert.equal(reactivated.schedule.anchorDay, 15);
+  assert.deepEqual((await repository.loadSnapshot()).chargeExceptions, exceptionsBefore);
 });

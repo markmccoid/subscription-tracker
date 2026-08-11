@@ -31,7 +31,7 @@ This implementation slice establishes the navigation and appearance foundation, 
 15. As a household member, I want to record No Charge with an optional reason, so that an expected charge can be resolved without changing its Subscription schedule.
 16. As a household member, I want History reachable from Upcoming, so that Recorded Spend remains available without becoming a permanent tab.
 17. As a household member, I want all non-archived Subscriptions shown by default, so that Paused and Canceled commitments remain discoverable.
-18. As a household member, I want Subscriptions grouped by lifecycle state, so that Active, Cancellation Pending, Paused, and Canceled commitments remain distinct.
+18. As a household member, I want Subscriptions grouped by lifecycle state, so that Active, Paused, and Canceled commitments remain distinct.
 19. As a household member, I want Archived Subscriptions behind an explicit filter, so that normal lists stay focused while retaining history.
 20. As a household member, I want to search Subscriptions by name, so that a growing Household List remains manageable.
 21. As a household member, I want lifecycle and Category filters, so that I can narrow the Subscription list intentionally.

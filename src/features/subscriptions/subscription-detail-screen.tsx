@@ -1,28 +1,18 @@
 import { Stack, useFocusEffect, useRouter } from "expo-router";
+import * as Linking from "expo-linking";
 import { useCallback, useState } from "react";
-import { ActivityIndicator, Linking, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 
 import { getSubscriptionTracker } from "@/application/create-subscription-tracker";
 import type { SubscriptionDetail } from "@/application/subscription-tracker";
-import type { Category, SubscriptionId } from "@/domain/model";
+import type { SubscriptionId } from "@/domain/model";
 import { useTheme } from "@/hooks/use-theme";
 
 const lifecycleLabels = {
   active: "Active",
   paused: "Paused",
-  cancellationPending: "Cancellation Pending",
   canceled: "Canceled",
 } as const;
-
-const categoryLabels: Record<Category, string> = {
-  entertainment: "Entertainment",
-  software: "Software",
-  news: "News",
-  health: "Health",
-  utilities: "Utilities",
-  finance: "Finance",
-  other: "Other",
-};
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
@@ -158,7 +148,7 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
           title="Profile"
           theme={theme}
           rows={[
-            ["Category", detail.category ? categoryLabels[detail.category] : "Uncategorized"],
+            ["Category", detail.category ?? "Uncategorized"],
             [
               "Default Payment Method",
               detail.defaultPaymentMethodName
@@ -218,13 +208,48 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
             {detail.cancellationUrl ? (
               <Pressable
                 accessibilityRole="link"
-                onPress={() => void Linking.openURL(detail.cancellationUrl!)}
+                onPress={() => {
+                  void Linking.openURL(detail.cancellationUrl!).catch((caught: unknown) =>
+                    setError(caught instanceof Error ? caught.message : "Could not open the Cancellation Website."),
+                  );
+                }}
               >
                 <Text selectable style={{ color: theme.accent, fontSize: 16 }}>
                   Open Cancellation Website
                 </Text>
               </Pressable>
             ) : null}
+          </View>
+        ) : null}
+        {!detail.archived ? (
+          <View style={{ gap: 10 }}>
+            {detail.lifecycle.status === "canceled" ? (
+              <>
+                <LifecycleButton
+                  label="Edit Cancellation Details"
+                  onPress={() =>
+                    router.push({ pathname: "/edit-cancellation/[id]", params: { id: detail.id } })
+                  }
+                  theme={theme}
+                />
+                <LifecycleButton
+                  label="Reactivate Subscription"
+                  onPress={() =>
+                    router.push({ pathname: "/reactivate-subscription/[id]", params: { id: detail.id } })
+                  }
+                  theme={theme}
+                />
+              </>
+            ) : (
+              <LifecycleButton
+                label="Mark as Canceled"
+                destructive
+                onPress={() =>
+                  router.push({ pathname: "/cancel-subscription/[id]", params: { id: detail.id } })
+                }
+                theme={theme}
+              />
+            )}
           </View>
         ) : null}
         <DetailSection
@@ -242,6 +267,40 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
         ) : null}
       </ScrollView>
     </>
+  );
+}
+
+function LifecycleButton({
+  label,
+  onPress,
+  destructive = false,
+  theme,
+}: {
+  readonly label: string;
+  readonly onPress: () => void;
+  readonly destructive?: boolean;
+  readonly theme: ReturnType<typeof useTheme>;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => ({
+        minHeight: 52,
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: 16,
+        borderCurve: "continuous",
+        borderWidth: 1,
+        borderColor: destructive ? theme.danger : theme.border,
+        backgroundColor: theme.backgroundElement,
+        opacity: pressed ? 0.72 : 1,
+      })}
+    >
+      <Text selectable style={{ color: destructive ? theme.danger : theme.accent, fontSize: 17, fontWeight: "700" }}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 

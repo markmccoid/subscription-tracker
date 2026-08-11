@@ -27,7 +27,7 @@ test('adds a complete Standard Subscription, Default Payment Method, and today o
     cycle: 'monthly',
     scheduleStartDate: '2026-08-09',
     anchorDay: 9,
-    category: 'software',
+    categoryId: '20000000-0000-4000-8000-000000000006',
     defaultPaymentMethodId: paymentMethod.id,
     reminderLeadDaysOverride: 7,
     notificationsMuted: true,
@@ -158,6 +158,51 @@ test('Payment Method names are case-insensitively unique', async () => {
   await tracker.initialize();
   await tracker.addPaymentMethod({ name: 'Amex' });
   await assert.rejects(() => tracker.addPaymentMethod({ name: '  AMEX  ' }), /already exists/);
+});
+
+test('Categories start alphabetized and enforce case-insensitive unique names', async () => {
+  const { tracker } = createHarness();
+  await tracker.initialize();
+
+  assert.deepEqual(
+    (await tracker.loadCategories()).map((category) => category.name),
+    ['Entertainment', 'Finance', 'Health', 'News', 'Other', 'Software', 'Utilities'],
+  );
+
+  await tracker.addCategory({ name: '  Personal  ' });
+  await assert.rejects(() => tracker.addCategory({ name: 'PERSONAL' }), /already exists/);
+  await assert.rejects(() => tracker.addCategory({ name: 'uncategorized' }), /reserved/);
+
+  assert.deepEqual(
+    (await tracker.loadCategories()).map((category) => category.name),
+    ['Entertainment', 'Finance', 'Health', 'News', 'Other', 'Personal', 'Software', 'Utilities'],
+  );
+});
+
+test('renaming a Category preserves assignments and deleting it moves Subscriptions to Uncategorized', async () => {
+  const { repository, tracker } = createHarness();
+  await tracker.initialize();
+  const category = await tracker.addCategory({ name: 'Streaming' });
+  const subscription = await tracker.addStandardSubscription({
+    name: 'Movie Club',
+    amountCents: 1299,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-09-09',
+    categoryId: category.id,
+  });
+  assert.equal(subscription.status, 'saved');
+  assert.equal((await tracker.loadCategories()).find((item) => item.id === category.id).subscriptionCount, 1);
+
+  await tracker.updateCategory({ categoryId: category.id, name: 'Video Streaming' });
+  const renamed = await tracker.loadSubscriptionDetail(subscription.subscriptionId);
+  assert.equal(renamed.categoryId, category.id);
+  assert.equal(renamed.category, 'Video Streaming');
+
+  await tracker.deleteCategory(category.id);
+  const uncategorized = await tracker.loadSubscriptionDetail(subscription.subscriptionId);
+  assert.equal(uncategorized.categoryId, null);
+  assert.equal(uncategorized.category, null);
+  assert.equal((await repository.loadSnapshot()).subscriptions[0].categoryId, null);
 });
 
 test('updates, retires, restores, and deletes a Payment Method without rewriting history', async () => {

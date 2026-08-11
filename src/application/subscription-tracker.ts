@@ -1,10 +1,11 @@
 import type { HouseholdRepository } from '@/data/household-repository';
+import { createCategory, updateCategory as renameCategory } from '@/domain/category';
 import { createStandardSubscription } from '@/domain/create-subscription';
 import type {
   BillingCycle,
   BillingOccurrence,
   BillingOccurrenceId,
-  Category,
+  CategoryId,
   ChargeExceptionId,
   HouseholdList,
   HouseholdListId,
@@ -15,6 +16,7 @@ import type {
   SubscriptionLifecycle,
   SubscriptionId,
 } from '@/domain/model';
+import { starterCategories } from '@/domain/model';
 import { createChargeException, createPayment } from '@/domain/occurrence-resolution';
 import {
   calendarDate,
@@ -38,6 +40,11 @@ import {
   updatePaymentMethod,
   updateStandardSubscription,
 } from '@/domain/subscription-profile';
+import {
+  cancelSubscription as markSubscriptionCanceled,
+  editCancellationDetails as updateCancellationDetails,
+  reactivateSubscription as returnSubscriptionToActive,
+} from '@/domain/subscription-lifecycle';
 
 export interface TrackerDependencies {
   readonly repository: HouseholdRepository;
@@ -51,7 +58,7 @@ export interface AddStandardSubscriptionCommand {
   readonly cycle: BillingCycle;
   readonly scheduleStartDate: string;
   readonly anchorDay?: number;
-  readonly category?: Category | null;
+  readonly categoryId?: CategoryId | null;
   readonly note?: string | null;
   readonly cancellationUrl?: string | null;
   readonly defaultPaymentMethodId?: PaymentMethodId | null;
@@ -71,6 +78,20 @@ export interface AddPaymentMethodCommand {
 
 export interface UpdatePaymentMethodCommand extends AddPaymentMethodCommand {
   readonly paymentMethodId: PaymentMethodId;
+}
+
+export interface AddCategoryCommand {
+  readonly name: string;
+}
+
+export interface UpdateCategoryCommand extends AddCategoryCommand {
+  readonly categoryId: CategoryId;
+}
+
+export interface CategoryOption {
+  readonly id: CategoryId;
+  readonly name: string;
+  readonly subscriptionCount: number;
 }
 
 export interface PaymentMethodOption {
@@ -97,7 +118,8 @@ export type SaveSubscriptionResult =
 export interface SubscriptionDetail {
   readonly id: SubscriptionId;
   readonly name: string;
-  readonly category: Category | null;
+  readonly categoryId: CategoryId | null;
+  readonly category: string | null;
   readonly note: string | null;
   readonly cancellationUrl: string | null;
   readonly defaultPaymentMethodId: PaymentMethodId | null;
@@ -121,7 +143,7 @@ export interface UpcomingCharge {
   readonly name: string;
   readonly billingDate: CalendarDate;
   readonly amountCents: number;
-  readonly category: Category | null;
+  readonly category: string | null;
 }
 
 export type UpcomingChargeGroupKey =
@@ -159,7 +181,34 @@ export interface BillingOccurrenceDetail {
   readonly billingDate: CalendarDate;
   readonly expectedAmountCents: number;
   readonly defaultPaymentMethodId: PaymentMethodId | null;
+  readonly cancellationUrl: string | null;
+  readonly canCancelSubscription: boolean;
   readonly resolution: BillingOccurrenceResolution;
+}
+
+export interface CancellationOccurrenceSummary {
+  readonly billingDate: CalendarDate;
+  readonly expectedAmountCents: number;
+}
+
+export interface CancellationPreview {
+  readonly subscriptionId: SubscriptionId;
+  readonly subscriptionName: string;
+  readonly confirmationDate: CalendarDate;
+  readonly affectedOccurrences: readonly CancellationOccurrenceSummary[];
+}
+
+export interface CancelSubscriptionCommand {
+  readonly subscriptionId: SubscriptionId;
+  readonly confirmationDate: string;
+  readonly accessEndDate?: string | null;
+}
+
+export type EditCancellationDetailsCommand = CancelSubscriptionCommand;
+
+export interface ReactivateSubscriptionCommand {
+  readonly subscriptionId: SubscriptionId;
+  readonly nextBillingDate: string;
 }
 
 export interface RecordPaymentCommand {
@@ -180,12 +229,25 @@ export interface RecordNoChargeCommand {
 export interface SubscriptionListItem {
   readonly id: SubscriptionId;
   readonly name: string;
-  readonly category: Category | null;
+  readonly categoryId: CategoryId | null;
+  readonly category: string | null;
   readonly lifecycle: SubscriptionLifecycle['status'];
   readonly amountCents: number;
   readonly cycle: BillingCycle;
   readonly nextBillingDate: CalendarDate | null;
   readonly archived: boolean;
+}
+
+export interface NotificationSettings {
+  readonly defaultReminderLeadDays: number;
+  readonly reminderTime: string;
+}
+
+export interface BillingReminderPlan {
+  readonly subscriptionId: SubscriptionId;
+  readonly subscriptionName: string;
+  readonly billingDate: CalendarDate;
+  readonly triggerDate: Date;
 }
 
 /** App-facing module: coordinates domain behavior while hiding persistence details from screens. */
@@ -200,6 +262,14 @@ export class SubscriptionTracker {
     if (!household) {
       household = this.createDefaultHousehold();
       await this.dependencies.repository.createHousehold(household);
+      for (const starter of starterCategories) {
+        await this.dependencies.repository.saveCategory(createCategory({
+          id: entityId<'Category'>(starter.id),
+          householdListId: household.id,
+          name: starter.name,
+          now: household.createdAt,
+        }));
+      }
     }
     this.householdId = household.id;
     await this.reconcileDueOccurrences(localCalendarDate(this.dependencies.now()));
@@ -208,16 +278,17 @@ export class SubscriptionTracker {
   async addStandardSubscription(command: AddStandardSubscriptionCommand): Promise<SaveSubscriptionResult> {
     const householdId = this.requireHouseholdId();
     const asOf = localCalendarDate(this.dependencies.now());
+    const snapshot = await this.dependencies.repository.loadSnapshot();
     const subscription = createStandardSubscription({
       ...command,
       id: entityId<'Subscription'>(this.dependencies.createId()),
       householdListId: householdId,
+      categoryId: validateCategoryAssignment(snapshot, command.categoryId),
       now: this.dependencies.now().toISOString(),
     });
     if (compareCalendarDates(subscription.schedule.startDate, asOf) < 0) {
       throw new DomainValidationError('First Billing Date cannot be in the past.');
     }
-    const snapshot = await this.dependencies.repository.loadSnapshot();
     validateDefaultPaymentMethod(snapshot, subscription.defaultPaymentMethodId, null);
     const duplicate = findPossibleDuplicate(snapshot.subscriptions, subscription, asOf);
     if (duplicate && !command.savePossibleDuplicate) {
@@ -250,7 +321,7 @@ export class SubscriptionTracker {
       current,
       {
         name: command.name,
-        category: command.category ?? null,
+        categoryId: validateCategoryAssignment(snapshot, command.categoryId),
         note: command.note ?? null,
         cancellationUrl: command.cancellationUrl ?? null,
         defaultPaymentMethodId: command.defaultPaymentMethodId ?? null,
@@ -273,6 +344,41 @@ export class SubscriptionTracker {
     }
     await this.dependencies.repository.saveSubscriptionWithOccurrences(subscription, elapsedOccurrences);
     return { status: 'saved', subscriptionId: subscription.id };
+  }
+
+  async addCategory(command: AddCategoryCommand): Promise<CategoryOption> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    validateUniqueCategoryName(snapshot, command.name);
+    const category = createCategory({
+      id: entityId<'Category'>(this.dependencies.createId()),
+      householdListId: this.requireHouseholdId(),
+      name: command.name,
+      now: this.dependencies.now().toISOString(),
+    });
+    await this.dependencies.repository.saveCategory(category);
+    return categoryOption(category, snapshot);
+  }
+
+  async loadCategories(): Promise<readonly CategoryOption[]> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    return snapshot.categories
+      .map((category) => categoryOption(category, snapshot))
+      .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
+  }
+
+  async updateCategory(command: UpdateCategoryCommand): Promise<CategoryOption> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const current = requireCategory(snapshot, command.categoryId);
+    validateUniqueCategoryName(snapshot, command.name, current.id);
+    const category = renameCategory(current, command.name, this.dependencies.now().toISOString());
+    await this.dependencies.repository.saveCategory(category);
+    return categoryOption(category, snapshot);
+  }
+
+  async deleteCategory(categoryId: CategoryId): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    requireCategory(snapshot, categoryId);
+    await this.dependencies.repository.deleteCategory(categoryId);
   }
 
   async addPaymentMethod(command: AddPaymentMethodCommand): Promise<PaymentMethodOption> {
@@ -337,7 +443,8 @@ export class SubscriptionTracker {
     return {
       id: subscription.id,
       name: subscription.name,
-      category: subscription.category,
+      categoryId: subscription.categoryId,
+      category: categoryName(snapshot, subscription.categoryId),
       note: subscription.note,
       cancellationUrl: subscription.cancellationUrl,
       defaultPaymentMethodId: subscription.defaultPaymentMethodId,
@@ -396,8 +503,92 @@ export class SubscriptionTracker {
       expectedAmountCents:
         occurrence?.expectedAmount ?? amountForOccurrence(subscription.pricing, billingDate),
       defaultPaymentMethodId: subscription.defaultPaymentMethodId,
+      cancellationUrl: subscription.cancellationUrl,
+      canCancelSubscription:
+        !subscription.archivedAt && subscription.lifecycle.status !== 'canceled',
       resolution,
     };
+  }
+
+  async loadCancellationPreview(
+    subscriptionId: SubscriptionId,
+    confirmationDateInput: string,
+  ): Promise<CancellationPreview> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const subscription = requireSubscription(snapshot, subscriptionId);
+    const asOf = localCalendarDate(this.dependencies.now());
+    const confirmationDate = calendarDate(confirmationDateInput);
+    markSubscriptionCanceled(subscription, {
+      confirmationDate,
+      asOf,
+      now: this.dependencies.now().toISOString(),
+    });
+    return {
+      subscriptionId,
+      subscriptionName: subscription.name,
+      confirmationDate,
+      affectedOccurrences: unresolvedCancellationOccurrences(
+        snapshot,
+        subscriptionId,
+        confirmationDate,
+        asOf,
+      ).map((occurrence) => ({
+        billingDate: occurrence.billingDate,
+        expectedAmountCents: occurrence.expectedAmount,
+      })),
+    };
+  }
+
+  async cancelSubscription(command: CancelSubscriptionCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const current = requireSubscription(snapshot, command.subscriptionId);
+    const now = this.dependencies.now();
+    const asOf = localCalendarDate(now);
+    const subscription = markSubscriptionCanceled(current, {
+      confirmationDate: command.confirmationDate,
+      accessEndDate: command.accessEndDate,
+      asOf,
+      now: now.toISOString(),
+    });
+    const exceptions = unresolvedCancellationOccurrences(
+      snapshot,
+      current.id,
+      calendarDate(command.confirmationDate),
+      asOf,
+    ).map((occurrence) =>
+      createChargeException({
+        id: entityId<'ChargeException'>(this.dependencies.createId()) as ChargeExceptionId,
+        billingOccurrenceId: occurrence.id,
+        reason: 'Subscription canceled before charge',
+        now: now.toISOString(),
+      }),
+    );
+    await this.dependencies.repository.saveSubscriptionCancellation(subscription, exceptions);
+  }
+
+  async editCancellationDetails(command: EditCancellationDetailsCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const current = requireSubscription(snapshot, command.subscriptionId);
+    const now = this.dependencies.now();
+    const subscription = updateCancellationDetails(current, {
+      confirmationDate: command.confirmationDate,
+      accessEndDate: command.accessEndDate,
+      asOf: localCalendarDate(now),
+      now: now.toISOString(),
+    });
+    await this.dependencies.repository.saveSubscription(subscription);
+  }
+
+  async reactivateSubscription(command: ReactivateSubscriptionCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const current = requireSubscription(snapshot, command.subscriptionId);
+    const now = this.dependencies.now();
+    const subscription = returnSubscriptionToActive(current, {
+      nextBillingDate: command.nextBillingDate,
+      asOf: localCalendarDate(now),
+      now: now.toISOString(),
+    });
+    await this.dependencies.repository.saveSubscription(subscription);
   }
 
   async recordPayment(command: RecordPaymentCommand): Promise<void> {
@@ -447,8 +638,7 @@ export class SubscriptionTracker {
     const activeSubscriptions = snapshot.subscriptions.filter(
       (subscription) =>
         subscription.archivedAt === null &&
-        (subscription.lifecycle.status === 'active' ||
-          subscription.lifecycle.status === 'cancellationPending'),
+        subscription.lifecycle.status === 'active',
     );
     const subscriptionsById = new Map(
       visibleSubscriptions.map((subscription) => [subscription.id, subscription]),
@@ -472,7 +662,7 @@ export class SubscriptionTracker {
           name: subscription.name,
           billingDate: occurrence.billingDate,
           amountCents: occurrence.expectedAmount,
-          category: subscription.category,
+          category: categoryName(snapshot, subscription.categoryId),
         };
       });
     const next7DaysEnd = addCalendarDays(asOf, 6);
@@ -531,8 +721,7 @@ export class SubscriptionTracker {
     return snapshot.subscriptions
       .map((subscription): SubscriptionListItem => {
         const nextBillingDate =
-          subscription.lifecycle.status === 'active' ||
-          subscription.lifecycle.status === 'cancellationPending'
+          subscription.lifecycle.status === 'active'
             ? nextOccurrenceOnOrAfter(subscription.schedule, asOf)
             : subscription.lifecycle.status === 'paused'
               ? subscription.lifecycle.pauseEndDate
@@ -541,7 +730,8 @@ export class SubscriptionTracker {
         return {
           id: subscription.id,
           name: subscription.name,
-          category: subscription.category,
+          categoryId: subscription.categoryId,
+          category: categoryName(snapshot, subscription.categoryId),
           lifecycle: subscription.lifecycle.status,
           amountCents: amountForOccurrence(subscription.pricing, amountDate),
           cycle: subscription.schedule.cycle,
@@ -555,6 +745,55 @@ export class SubscriptionTracker {
       });
   }
 
+  async loadNotificationSettings(): Promise<NotificationSettings> {
+    const { household } = await this.dependencies.repository.loadSnapshot();
+    return {
+      defaultReminderLeadDays: household.defaultReminderLeadDays,
+      reminderTime: household.reminderTime,
+    };
+  }
+
+  async updateDefaultReminderLeadDays(defaultReminderLeadDays: number): Promise<void> {
+    if (!Number.isInteger(defaultReminderLeadDays) || defaultReminderLeadDays < 0 || defaultReminderLeadDays > 365) {
+      throw new DomainValidationError('Default Lead Time must be a whole number from 0 to 365.');
+    }
+    const { household } = await this.dependencies.repository.loadSnapshot();
+    if (household.defaultReminderLeadDays === defaultReminderLeadDays) return;
+    await this.dependencies.repository.saveHousehold({
+      ...household,
+      defaultReminderLeadDays,
+      updatedAt: utcTimestamp(this.dependencies.now().toISOString()),
+    });
+  }
+
+  async loadBillingReminderPlans(): Promise<readonly BillingReminderPlan[]> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const now = this.dependencies.now();
+    const asOf = localCalendarDate(now);
+    return snapshot.subscriptions.flatMap((subscription) => {
+      if (
+        subscription.archivedAt ||
+        subscription.notificationsMuted ||
+        subscription.lifecycle.status !== 'active'
+      ) {
+        return [];
+      }
+      const leadDays = subscription.reminderLeadDaysOverride ?? snapshot.household.defaultReminderLeadDays;
+      let billingDate = nextOccurrenceOnOrAfter(subscription.schedule, asOf);
+      let triggerDate = localReminderDate(billingDate, leadDays, snapshot.household.reminderTime);
+      if (triggerDate <= now) {
+        billingDate = nextOccurrenceOnOrAfter(subscription.schedule, addCalendarDays(billingDate, 1));
+        triggerDate = localReminderDate(billingDate, leadDays, snapshot.household.reminderTime);
+      }
+      return [{
+        subscriptionId: subscription.id,
+        subscriptionName: subscription.name,
+        billingDate,
+        triggerDate,
+      }];
+    });
+  }
+
   private async reconcileDueOccurrences(asOf: CalendarDate): Promise<void> {
     const snapshot = await this.dependencies.repository.loadSnapshot();
     const existing = new Set(
@@ -566,8 +805,7 @@ export class SubscriptionTracker {
     const missing: BillingOccurrence[] = [];
     for (const subscription of snapshot.subscriptions) {
       if (
-        subscription.lifecycle.status !== 'active' &&
-        subscription.lifecycle.status !== 'cancellationPending'
+        subscription.lifecycle.status !== 'active'
       ) {
         continue;
       }
@@ -617,8 +855,7 @@ export class SubscriptionTracker {
     asOf: CalendarDate,
   ): readonly BillingOccurrence[] {
     if (
-      subscription.lifecycle.status !== 'active' &&
-      subscription.lifecycle.status !== 'cancellationPending'
+      subscription.lifecycle.status !== 'active'
     ) {
       return [];
     }
@@ -642,7 +879,7 @@ export class SubscriptionTracker {
     return {
       id: entityId<'HouseholdList'>(this.dependencies.createId()),
       currency: 'USD',
-      defaultReminderLeadDays: 3,
+      defaultReminderLeadDays: 5,
       reminderTime: '09:00',
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -656,6 +893,54 @@ export class SubscriptionTracker {
 }
 
 type Snapshot = Awaited<ReturnType<HouseholdRepository['loadSnapshot']>>;
+
+function categoryOption(category: Snapshot['categories'][number], snapshot: Snapshot): CategoryOption {
+  return {
+    id: category.id,
+    name: category.name,
+    subscriptionCount: snapshot.subscriptions.filter(
+      (subscription) => subscription.categoryId === category.id,
+    ).length,
+  };
+}
+
+function requireCategory(snapshot: Snapshot, categoryId: CategoryId) {
+  const category = snapshot.categories.find((item) => item.id === categoryId);
+  if (!category) throw new DomainValidationError('Category not found.');
+  return category;
+}
+
+function validateUniqueCategoryName(
+  snapshot: Snapshot,
+  name: string,
+  excludedId?: CategoryId,
+): void {
+  const normalizedName = name.trim().toLocaleLowerCase();
+  if (normalizedName === 'uncategorized') {
+    throw new DomainValidationError('Uncategorized is reserved for Subscriptions without a Category.');
+  }
+  if (snapshot.categories.some(
+    (item) => item.id !== excludedId && item.name.trim().toLocaleLowerCase() === normalizedName,
+  )) {
+    throw new DomainValidationError('A Category with this name already exists.');
+  }
+}
+
+function validateCategoryAssignment(
+  snapshot: Snapshot,
+  categoryId: CategoryId | null | undefined,
+): CategoryId | null {
+  if (!categoryId) return null;
+  if (!snapshot.categories.some((item) => item.id === categoryId)) {
+    throw new DomainValidationError('Selected Category does not exist.');
+  }
+  return categoryId;
+}
+
+function categoryName(snapshot: Snapshot, categoryId: CategoryId | null): string | null {
+  if (!categoryId) return null;
+  return snapshot.categories.find((item) => item.id === categoryId)?.name ?? null;
+}
 
 function paymentMethodOption(paymentMethod: Snapshot['paymentMethods'][number], snapshot: Snapshot): PaymentMethodOption {
   return {
@@ -735,8 +1020,7 @@ function findPossibleDuplicate(
 
 function nextBillingDateFor(subscription: Subscription, asOf: CalendarDate): CalendarDate | null {
   if (
-    subscription.lifecycle.status === 'active' ||
-    subscription.lifecycle.status === 'cancellationPending'
+    subscription.lifecycle.status === 'active'
   ) {
     return nextOccurrenceOnOrAfter(subscription.schedule, asOf);
   }
@@ -765,7 +1049,7 @@ function upcomingChargeFor(
     name: subscription.name,
     billingDate,
     amountCents: occurrence?.expectedAmount ?? amountForOccurrence(subscription.pricing, billingDate),
-    category: subscription.category,
+    category: categoryName(snapshot, subscription.categoryId),
   };
 }
 
@@ -784,8 +1068,7 @@ function isProjectedOccurrence(
   billingDate: CalendarDate,
 ): boolean {
   if (
-    subscription.lifecycle.status !== 'active' &&
-    subscription.lifecycle.status !== 'cancellationPending'
+    subscription.lifecycle.status !== 'active'
   ) {
     return false;
   }
@@ -853,12 +1136,44 @@ function addCalendarDays(date: CalendarDate, count: number): CalendarDate {
   return formatCalendarDate(year, month, day);
 }
 
+function localReminderDate(billingDate: CalendarDate, leadDays: number, reminderTime: string): Date {
+  const { year, month, day } = calendarParts(billingDate);
+  const [hour, minute] = reminderTime.split(':').map(Number);
+  const result = new Date(year, month - 1, day, hour, minute, 0, 0);
+  result.setDate(result.getDate() - leadDays);
+  return result;
+}
+
 function lifecycleRank(status: SubscriptionLifecycle['status']): number {
-  return status === 'active'
-    ? 0
-    : status === 'cancellationPending'
-      ? 1
-      : status === 'paused'
-        ? 2
-        : 3;
+  return status === 'active' ? 0 : status === 'paused' ? 1 : 2;
+}
+
+function requireSubscription(
+  snapshot: Awaited<ReturnType<HouseholdRepository['loadSnapshot']>>,
+  subscriptionId: SubscriptionId,
+): Subscription {
+  const subscription = snapshot.subscriptions.find((item) => item.id === subscriptionId);
+  if (!subscription) throw new Error('Subscription not found.');
+  return subscription;
+}
+
+function unresolvedCancellationOccurrences(
+  snapshot: Awaited<ReturnType<HouseholdRepository['loadSnapshot']>>,
+  subscriptionId: SubscriptionId,
+  confirmationDate: CalendarDate,
+  asOf: CalendarDate,
+): readonly BillingOccurrence[] {
+  const resolvedIds = new Set([
+    ...snapshot.payments.map((payment) => payment.billingOccurrenceId),
+    ...snapshot.chargeExceptions.map((exception) => exception.billingOccurrenceId),
+  ]);
+  return snapshot.billingOccurrences
+    .filter(
+      (occurrence) =>
+        occurrence.subscriptionId === subscriptionId &&
+        compareCalendarDates(occurrence.billingDate, confirmationDate) >= 0 &&
+        compareCalendarDates(occurrence.billingDate, asOf) <= 0 &&
+        !resolvedIds.has(occurrence.id),
+    )
+    .sort((left, right) => compareCalendarDates(left.billingDate, right.billingDate));
 }

@@ -29,32 +29,25 @@ import {
 import {
   localCalendarDate,
   type AddStandardSubscriptionCommand,
+  type CategoryOption,
   type EditStandardSubscriptionCommand,
   type PaymentMethodOption,
   type SaveSubscriptionResult,
   type SubscriptionDetail,
 } from '@/application/subscription-tracker';
-import { categories, type BillingCycle, type Category, type PaymentMethodId } from '@/domain/model';
+import type { BillingCycle, CategoryId, PaymentMethodId } from '@/domain/model';
 import { calendarDate, calendarParts, daysInMonth } from '@/domain/primitives';
 import { useTheme } from '@/hooks/use-theme';
-
-const categoryLabels: Record<Category, string> = {
-  entertainment: 'Entertainment',
-  software: 'Software',
-  news: 'News',
-  health: 'Health',
-  utilities: 'Utilities',
-  finance: 'Finance',
-  other: 'Other',
-};
+import { reconcileBillingReminders } from '@/notifications/billing-notifications';
 
 type ReminderChoice = 'default' | '0' | '1' | '3' | '7' | 'custom';
+type CategorySelection = CategoryId | 'uncategorized';
 
 interface FormValues {
   readonly name: string;
   readonly amount: string;
   readonly cycle: BillingCycle;
-  readonly category: Category | 'uncategorized';
+  readonly categoryId: CategorySelection;
   readonly billingDate: Date;
   readonly anchorDay: string;
   readonly defaultPaymentMethodId: PaymentMethodId | null;
@@ -74,7 +67,7 @@ export function AddSubscriptionScreen() {
         name: '',
         amount: '',
         cycle: 'monthly',
-        category: 'uncategorized',
+        categoryId: 'uncategorized',
         billingDate: initialDate,
         anchorDay: String(initialDate.getDate()),
         defaultPaymentMethodId: null,
@@ -104,7 +97,7 @@ export function EditSubscriptionScreen({ detail }: { readonly detail: Subscripti
         name: detail.name,
         amount: formatCents(detail.pricing.standardAmount),
         cycle: detail.schedule.cycle,
-        category: detail.category ?? 'uncategorized',
+        categoryId: detail.categoryId ?? 'uncategorized',
         billingDate: dateFromCalendar(detail.nextBillingDate ?? detail.schedule.startDate),
         anchorDay: String(detail.schedule.anchorDay),
         defaultPaymentMethodId: detail.defaultPaymentMethodId,
@@ -139,7 +132,7 @@ function SubscriptionForm({
   const [name, setName] = useState(initial.name);
   const [amount, setAmount] = useState(initial.amount);
   const [cycle, setCycle] = useState(initial.cycle);
-  const [category, setCategory] = useState(initial.category);
+  const [categoryId, setCategoryId] = useState(initial.categoryId);
   const [billingDate, setBillingDate] = useState(initial.billingDate);
   const [anchorDay, setAnchorDay] = useState(initial.anchorDay);
   const [defaultPaymentMethodId, setDefaultPaymentMethodId] = useState(initial.defaultPaymentMethodId);
@@ -150,17 +143,19 @@ function SubscriptionForm({
   const [cancellationUrl, setCancellationUrl] = useState(initial.cancellationUrl);
   const [additionalExpanded, setAdditionalExpanded] = useState(mode === 'edit' && Boolean(initial.note || initial.cancellationUrl));
   const [paymentMethods, setPaymentMethods] = useState<readonly PaymentMethodOption[]>([]);
+  const [categories, setCategories] = useState<readonly CategoryOption[]>([]);
   const [notificationsDenied, setNotificationsDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const allowExit = useRef(false);
   const awaitingPaymentMethod = useRef<Set<string> | null>(null);
+  const awaitingCategory = useRef<Set<string> | null>(null);
 
   const values: FormValues = {
     name,
     amount,
     cycle,
-    category,
+    categoryId,
     billingDate,
     anchorDay,
     defaultPaymentMethodId,
@@ -174,8 +169,7 @@ function SubscriptionForm({
   const validation = validateForm(values, mode, detail);
   const saveDisabled = saving || !dirty || validation !== null;
   const visibleError = dirty && validation ? validation : error;
-  const scheduleEditable =
-    mode === 'add' || detail?.lifecycle.status === 'active' || detail?.lifecycle.status === 'cancellationPending';
+  const scheduleEditable = mode === 'add' || detail?.lifecycle.status === 'active';
   const pricingEditable = mode === 'add' || detail?.lifecycle.status !== 'canceled';
   const remindersEditable = mode === 'add' || detail?.lifecycle.status !== 'canceled';
 
@@ -183,19 +177,32 @@ function SubscriptionForm({
     useCallback(() => {
       let active = true;
       void getSubscriptionTracker()
-        .then((tracker) => tracker.loadPaymentMethods())
-        .then((next) => {
+        .then((tracker) => Promise.all([tracker.loadPaymentMethods(), tracker.loadCategories()]))
+        .then(([nextPaymentMethods, nextCategories]) => {
           if (!active) return;
           const previous = awaitingPaymentMethod.current;
-          setPaymentMethods(next);
+          setPaymentMethods(nextPaymentMethods);
           if (previous) {
-            const created = next.find((item) => !previous.has(item.id));
+            const created = nextPaymentMethods.find((item) => !previous.has(item.id));
             if (created) setDefaultPaymentMethodId(created.id);
             awaitingPaymentMethod.current = null;
           }
+          const previousCategories = awaitingCategory.current;
+          setCategories(nextCategories);
+          if (previousCategories) {
+            const created = nextCategories.find((item) => !previousCategories.has(item.id));
+            if (created) setCategoryId(created.id);
+            awaitingCategory.current = null;
+          } else {
+            setCategoryId((current) =>
+              current === 'uncategorized' || nextCategories.some((item) => item.id === current)
+                ? current
+                : 'uncategorized',
+            );
+          }
         })
         .catch((caught: unknown) => {
-          if (active) setError(errorMessage(caught, 'Could not load Payment Methods.'));
+          if (active) setError(errorMessage(caught, 'Could not load Categories and Payment Methods.'));
         });
       return () => {
         active = false;
@@ -277,7 +284,7 @@ function SubscriptionForm({
         name,
         amountCents: parseDollarsToCents(amount),
         cycle,
-        category: category === 'uncategorized' ? null : category,
+        categoryId: categoryId === 'uncategorized' ? null : categoryId,
         scheduleStartDate:
           mode === 'edit' && detail && !scheduleInputsChanged
             ? detail.schedule.startDate
@@ -317,6 +324,7 @@ function SubscriptionForm({
 
   const handleSaveResult = (result: SaveSubscriptionResult) => {
     if (result.status === 'saved') {
+      void reconcileBillingReminders();
       allowExit.current = true;
       router.back();
       return;
@@ -357,11 +365,22 @@ function SubscriptionForm({
         <Form>
           <Section title="Subscription">
             <TextField text={nameState} placeholder="Name" onTextChange={setName} maxLength={200} />
-            <Picker<Category | 'uncategorized'> label="Category" selection={category} onSelectionChange={setCategory}>
+            <Picker<string>
+              label="Category"
+              selection={categoryId}
+              onSelectionChange={(selection) => {
+                if (selection === 'add-category') {
+                  awaitingCategory.current = new Set(categories.map((item) => item.id));
+                  router.push('/add-category');
+                } else {
+                  setCategoryId(selection === 'uncategorized' ? 'uncategorized' : selection as CategoryId);
+                }
+              }}>
               <Text modifiers={[tag('uncategorized')]}>Uncategorized</Text>
               {categories.map((option) => (
-                <Text key={option} modifiers={[tag(option)]}>{categoryLabels[option]}</Text>
+                <Text key={option.id} modifiers={[tag(option.id)]}>{option.name}</Text>
               ))}
+              <Text modifiers={[tag('add-category')]}>Add Category…</Text>
             </Picker>
           </Section>
 

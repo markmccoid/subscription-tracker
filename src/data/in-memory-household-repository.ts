@@ -1,6 +1,7 @@
 import type { HouseholdRepository } from './household-repository';
 import type {
   BillingOccurrence,
+  Category,
   ChargeException,
   HouseholdList,
   HouseholdSnapshot,
@@ -17,6 +18,7 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
   private readonly payments = new Map<string, Payment>();
   private readonly chargeExceptions = new Map<string, ChargeException>();
   private readonly paymentMethods = new Map<string, PaymentMethod>();
+  private readonly categories = new Map<string, Category>();
 
   async migrate(): Promise<void> {}
 
@@ -29,6 +31,13 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
     this.household = household;
   }
 
+  async saveHousehold(household: HouseholdList): Promise<void> {
+    if (!this.household || this.household.id !== household.id) {
+      throw new Error('Household List has not been initialized.');
+    }
+    this.household = household;
+  }
+
   async loadSnapshot(): Promise<HouseholdSnapshot> {
     if (!this.household) throw new Error('Household List has not been initialized.');
     return {
@@ -38,6 +47,7 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
       payments: [...this.payments.values()],
       chargeExceptions: [...this.chargeExceptions.values()],
       paymentMethods: [...this.paymentMethods.values()],
+      categories: [...this.categories.values()].sort((left, right) => left.name.localeCompare(right.name)),
     };
   }
 
@@ -53,6 +63,27 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
     await this.saveBillingOccurrences(occurrences);
   }
 
+  async saveSubscriptionCancellation(
+    subscription: Subscription,
+    exceptions: readonly ChargeException[],
+  ): Promise<void> {
+    for (const exception of exceptions) {
+      const occurrence = this.billingOccurrences.get(exception.billingOccurrenceId);
+      if (!occurrence || occurrence.subscriptionId !== subscription.id) {
+        throw new Error('Cancellation resolution does not belong to this Subscription.');
+      }
+      if (
+        [...this.payments.values(), ...this.chargeExceptions.values()].some(
+          (resolution) => resolution.billingOccurrenceId === exception.billingOccurrenceId,
+        )
+      ) {
+        throw new Error('Billing Occurrence has already been resolved.');
+      }
+    }
+    this.subscriptions.set(subscription.id, subscription);
+    for (const exception of exceptions) this.chargeExceptions.set(exception.id, exception);
+  }
+
   async saveBillingOccurrences(occurrences: readonly BillingOccurrence[]): Promise<void> {
     for (const occurrence of occurrences) {
       const key = `${occurrence.subscriptionId}:${occurrence.billingDate}`;
@@ -62,6 +93,26 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
         this.billingOccurrences.set(occurrence.id, occurrence);
       }
     }
+  }
+
+  async saveCategory(category: Category): Promise<void> {
+    const duplicate = [...this.categories.values()].find(
+      (current) =>
+        current.id !== category.id &&
+        current.name.trim().toLocaleLowerCase() === category.name.trim().toLocaleLowerCase(),
+    );
+    if (duplicate) throw new Error('A Category with this name already exists.');
+    this.categories.set(category.id, category);
+  }
+
+  async deleteCategory(categoryId: Category['id']): Promise<void> {
+    if (!this.categories.has(categoryId)) throw new Error('Category not found.');
+    for (const [id, subscription] of this.subscriptions) {
+      if (subscription.categoryId === categoryId) {
+        this.subscriptions.set(id, { ...subscription, categoryId: null });
+      }
+    }
+    this.categories.delete(categoryId);
   }
 
   async savePaymentMethod(paymentMethod: PaymentMethod): Promise<void> {

@@ -37,7 +37,7 @@ Cancel and Save live in the sheet toolbar. Save is enabled only for a valid chan
 
 ## Editing rules
 
-- Active and Cancellation Pending Subscriptions allow the complete profile to be edited.
+- Active Subscriptions allow the complete profile to be edited.
 - Paused Subscriptions allow profile and pricing edits but keep Billing Schedule read-only until Resume establishes a new schedule.
 - Canceled Subscriptions allow descriptive fields only; Pricing and Billing Schedule remain read-only until Reactivation.
 - Archived Subscriptions remain read-only until restored.

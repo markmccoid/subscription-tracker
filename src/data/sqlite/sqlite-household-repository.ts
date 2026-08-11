@@ -2,9 +2,9 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 import type { HouseholdRepository } from '@/data/household-repository';
 import {
-  categories,
   type BillingOccurrence,
   type Category,
+  type CategoryId,
   type ChargeException,
   type ChargeExceptionId,
   type HouseholdList,
@@ -40,6 +40,7 @@ type SubscriptionRow = {
   household_list_id: string;
   name: string;
   category: string | null;
+  category_id: string | null;
   note: string | null;
   cancellation_url: string | null;
   default_payment_method_id: string | null;
@@ -51,7 +52,7 @@ type SubscriptionRow = {
   promotional_amount_cents: number | null;
   trial_conversion_date: string | null;
   promotion_end_date: string | null;
-  lifecycle_status: 'active' | 'paused' | 'cancellationPending' | 'canceled';
+  lifecycle_status: 'active' | 'paused' | 'canceled';
   pause_end_date: string | null;
   cancellation_initiated_date: string | null;
   cancellation_confirmation_date: string | null;
@@ -77,6 +78,14 @@ type PaymentMethodRow = {
   name: string;
   note: string | null;
   retired_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type CategoryRow = {
+  id: string;
+  household_list_id: string;
+  name: string;
   created_at: string;
   updated_at: string;
 };
@@ -126,10 +135,22 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
     );
   }
 
+  async saveHousehold(household: HouseholdList): Promise<void> {
+    await this.db.runAsync(
+      `UPDATE household_lists
+       SET default_reminder_lead_days = ?, reminder_time = ?, updated_at = ?
+       WHERE id = ?`,
+      household.defaultReminderLeadDays,
+      household.reminderTime,
+      household.updatedAt,
+      household.id,
+    );
+  }
+
   async loadSnapshot(): Promise<HouseholdSnapshot> {
     const household = await this.getHousehold();
     if (!household) throw new Error('Household List has not been initialized.');
-    const [subscriptionRows, occurrenceRows, paymentRows, exceptionRows, paymentMethodRows] = await Promise.all([
+    const [subscriptionRows, occurrenceRows, paymentRows, exceptionRows, paymentMethodRows, categoryRows] = await Promise.all([
       this.db.getAllAsync<SubscriptionRow>('SELECT * FROM subscriptions ORDER BY name COLLATE NOCASE'),
       this.db.getAllAsync<OccurrenceRow>(
         'SELECT * FROM billing_occurrences ORDER BY billing_date, subscription_id',
@@ -139,6 +160,7 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
       this.db.getAllAsync<PaymentMethodRow>(
         'SELECT * FROM payment_methods ORDER BY name COLLATE NOCASE',
       ),
+      this.db.getAllAsync<CategoryRow>('SELECT * FROM categories ORDER BY name COLLATE NOCASE'),
     ]);
     return {
       household,
@@ -147,6 +169,7 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
       payments: paymentRows.map(paymentFromRow),
       chargeExceptions: exceptionRows.map(chargeExceptionFromRow),
       paymentMethods: paymentMethodRows.map(paymentMethodFromRow),
+      categories: categoryRows.map(categoryFromRow),
     };
   }
 
@@ -169,12 +192,60 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
     });
   }
 
+  async saveSubscriptionCancellation(
+    subscription: Subscription,
+    exceptions: readonly ChargeException[],
+  ): Promise<void> {
+    await this.db.withExclusiveTransactionAsync(async (transaction) => {
+      await upsertSubscription(transaction, subscription);
+      for (const exception of exceptions) {
+        await transaction.runAsync(
+          `INSERT INTO charge_exceptions
+           (id, billing_occurrence_id, reason, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)`,
+          exception.id,
+          exception.billingOccurrenceId,
+          exception.reason,
+          exception.createdAt,
+          exception.updatedAt,
+        );
+      }
+      await transaction.runAsync(
+        `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
+      );
+    });
+  }
+
   async saveBillingOccurrences(occurrences: readonly BillingOccurrence[]): Promise<void> {
     if (occurrences.length === 0) return;
     await this.db.withExclusiveTransactionAsync(async (transaction) => {
       for (const occurrence of occurrences) {
         await insertOccurrence(transaction, occurrence);
       }
+    });
+  }
+
+  async saveCategory(category: Category): Promise<void> {
+    await this.db.runAsync(
+      `INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at`,
+      category.id,
+      category.householdListId,
+      category.name,
+      category.createdAt,
+      category.updatedAt,
+    );
+  }
+
+  async deleteCategory(categoryId: CategoryId): Promise<void> {
+    await this.db.withExclusiveTransactionAsync(async (transaction) => {
+      await transaction.runAsync(
+        'UPDATE subscriptions SET category_id = NULL WHERE category_id = ?',
+        categoryId,
+      );
+      const result = await transaction.runAsync('DELETE FROM categories WHERE id = ?', categoryId);
+      if (result.changes === 0) throw new Error('Category not found.');
     });
   }
 
@@ -284,15 +355,7 @@ function subscriptionFromRow(row: SubscriptionRow): Subscription {
   const lifecycle =
     row.lifecycle_status === 'paused'
       ? { status: 'paused' as const, pauseEndDate: nullableDate(row.pause_end_date) }
-      : row.lifecycle_status === 'cancellationPending'
-        ? {
-            status: 'cancellationPending' as const,
-            cancellationInitiatedDate: requiredDate(
-              row.cancellation_initiated_date,
-              'cancellation initiated',
-            ),
-          }
-        : row.lifecycle_status === 'canceled'
+      : row.lifecycle_status === 'canceled'
           ? {
               status: 'canceled' as const,
               cancellationConfirmationDate: requiredDate(
@@ -306,7 +369,7 @@ function subscriptionFromRow(row: SubscriptionRow): Subscription {
     id: entityId<'Subscription'>(row.id),
     householdListId: entityId<'HouseholdList'>(row.household_list_id),
     name: row.name,
-    category: parseCategory(row.category),
+    categoryId: row.category_id ? entityId<'Category'>(row.category_id) : null,
     note: row.note,
     cancellationUrl: row.cancellation_url,
     defaultPaymentMethodId: row.default_payment_method_id
@@ -340,6 +403,16 @@ function paymentMethodFromRow(row: PaymentMethodRow): PaymentMethod {
     name: row.name,
     note: row.note,
     retiredAt: row.retired_at ? utcTimestamp(row.retired_at) : null,
+    createdAt: utcTimestamp(row.created_at),
+    updatedAt: utcTimestamp(row.updated_at),
+  };
+}
+
+function categoryFromRow(row: CategoryRow): Category {
+  return {
+    id: entityId<'Category'>(row.id),
+    householdListId: entityId<'HouseholdList'>(row.household_list_id),
+    name: row.name,
     createdAt: utcTimestamp(row.created_at),
     updatedAt: utcTimestamp(row.updated_at),
   };
@@ -392,19 +465,19 @@ async function upsertSubscription(
 ): Promise<void> {
   await database.runAsync(
     `INSERT INTO subscriptions (
-      id, household_list_id, name, category, note, cancellation_url, default_payment_method_id,
+      id, household_list_id, name, category, category_id, note, cancellation_url, default_payment_method_id,
       billing_cycle, schedule_start_date, billing_anchor_day, pricing_kind, standard_amount_cents,
       promotional_amount_cents, trial_conversion_date, promotion_end_date, lifecycle_status,
       pause_end_date, cancellation_initiated_date, cancellation_confirmation_date, access_end_date,
       reminder_lead_days_override, notifications_muted, archived_at, created_at, updated_at
     ) VALUES (
-      $id, $household_list_id, $name, $category, $note, $cancellation_url, $default_payment_method_id,
+      $id, $household_list_id, $name, NULL, $category_id, $note, $cancellation_url, $default_payment_method_id,
       $billing_cycle, $schedule_start_date, $billing_anchor_day, $pricing_kind, $standard_amount_cents,
       $promotional_amount_cents, $trial_conversion_date, $promotion_end_date, $lifecycle_status,
       $pause_end_date, $cancellation_initiated_date, $cancellation_confirmation_date, $access_end_date,
       $reminder_lead_days_override, $notifications_muted, $archived_at, $created_at, $updated_at
     ) ON CONFLICT(id) DO UPDATE SET
-      name=excluded.name, category=excluded.category, note=excluded.note,
+      name=excluded.name, category=NULL, category_id=excluded.category_id, note=excluded.note,
       cancellation_url=excluded.cancellation_url, default_payment_method_id=excluded.default_payment_method_id,
       billing_cycle=excluded.billing_cycle, schedule_start_date=excluded.schedule_start_date,
       billing_anchor_day=excluded.billing_anchor_day, pricing_kind=excluded.pricing_kind,
@@ -429,7 +502,7 @@ function subscriptionToRow(subscription: Subscription): Record<string, string | 
     $id: subscription.id,
     $household_list_id: subscription.householdListId,
     $name: subscription.name,
-    $category: subscription.category,
+    $category_id: subscription.categoryId,
     $note: subscription.note,
     $cancellation_url: subscription.cancellationUrl,
     $default_payment_method_id: subscription.defaultPaymentMethodId,
@@ -443,8 +516,7 @@ function subscriptionToRow(subscription: Subscription): Record<string, string | 
     $promotion_end_date: pricing.kind === 'promotion' ? pricing.promotionEndDate : null,
     $lifecycle_status: lifecycle.status,
     $pause_end_date: lifecycle.status === 'paused' ? lifecycle.pauseEndDate : null,
-    $cancellation_initiated_date:
-      lifecycle.status === 'cancellationPending' ? lifecycle.cancellationInitiatedDate : null,
+    $cancellation_initiated_date: null,
     $cancellation_confirmation_date:
       lifecycle.status === 'canceled' ? lifecycle.cancellationConfirmationDate : null,
     $access_end_date: lifecycle.status === 'canceled' ? lifecycle.accessEndDate : null,
@@ -454,10 +526,6 @@ function subscriptionToRow(subscription: Subscription): Record<string, string | 
     $created_at: subscription.createdAt,
     $updated_at: subscription.updatedAt,
   };
-}
-
-function parseCategory(value: string | null): Category | null {
-  return value && categories.includes(value as Category) ? (value as Category) : null;
 }
 
 function nullableDate(value: string | null): CalendarDate | null {

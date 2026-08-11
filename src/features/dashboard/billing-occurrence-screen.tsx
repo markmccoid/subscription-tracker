@@ -1,4 +1,5 @@
 import { useFocusEffect, useRouter, type Href } from 'expo-router';
+import * as Linking from 'expo-linking';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -91,6 +92,37 @@ export function BillingOccurrenceScreen({
           ) : (
             <ResolutionCard detail={detail} />
           )}
+
+          {detail.cancellationUrl || detail.canCancelSubscription ? (
+            <View style={styles.actions}>
+              {detail.cancellationUrl ? (
+                <Pressable
+                  accessibilityRole="link"
+                  onPress={() => {
+                    void Linking.openURL(detail.cancellationUrl!).catch((caught: unknown) =>
+                      setError(caught instanceof Error ? caught.message : 'Could not open the Cancellation Website.'),
+                    );
+                  }}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    { borderColor: theme.border, backgroundColor: theme.backgroundElement, opacity: pressed ? 0.72 : 1 },
+                  ]}>
+                  <Text style={[styles.secondaryButtonText, { color: theme.accent }]}>Open Cancellation Website</Text>
+                </Pressable>
+              ) : null}
+              {detail.canCancelSubscription ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => router.push({ pathname: '/cancel-subscription/[id]', params: { id: detail.subscriptionId } })}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    { borderColor: theme.danger, backgroundColor: theme.backgroundElement, opacity: pressed ? 0.72 : 1 },
+                  ]}>
+                  <Text style={[styles.secondaryButtonText, { color: theme.danger }]}>Mark as Canceled</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
 
           <Pressable
             accessibilityRole="link"

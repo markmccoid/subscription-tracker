@@ -3,49 +3,25 @@ import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, SectionList, Text, View } from "react-native";
 
 import { getSubscriptionTracker } from "@/application/create-subscription-tracker";
-import type { SubscriptionListItem } from "@/application/subscription-tracker";
-import type { Category } from "@/domain/model";
+import type { CategoryOption, SubscriptionListItem } from "@/application/subscription-tracker";
+import type { CategoryId } from "@/domain/model";
 import { useTheme } from "@/hooks/use-theme";
 
 type LifecycleFilter = SubscriptionListItem["lifecycle"] | "all" | "archived";
-type CategoryFilter = Category | "all" | "uncategorized";
+type CategoryFilter = CategoryId | "all" | "uncategorized";
 
 const lifecycleFilters: readonly { readonly value: LifecycleFilter; readonly label: string }[] = [
   { value: "all", label: "All" },
   { value: "active", label: "Active" },
-  { value: "cancellationPending", label: "Cancellation Pending" },
   { value: "paused", label: "Paused" },
   { value: "canceled", label: "Canceled" },
   { value: "archived", label: "Archived" },
 ];
 
-const categoryFilters: readonly { readonly value: CategoryFilter; readonly label: string }[] = [
-  { value: "all", label: "Every Category" },
-  { value: "entertainment", label: "Entertainment" },
-  { value: "software", label: "Software" },
-  { value: "news", label: "News" },
-  { value: "health", label: "Health" },
-  { value: "utilities", label: "Utilities" },
-  { value: "finance", label: "Finance" },
-  { value: "other", label: "Other" },
-  { value: "uncategorized", label: "Uncategorized" },
-];
-
 const lifecycleLabels: Record<SubscriptionListItem["lifecycle"], string> = {
   active: "Active",
-  cancellationPending: "Cancellation Pending",
   paused: "Paused",
   canceled: "Canceled",
-};
-
-const categoryLabels: Record<Category, string> = {
-  entertainment: "Entertainment",
-  software: "Software",
-  news: "News",
-  health: "Health",
-  utilities: "Utilities",
-  finance: "Finance",
-  other: "Other",
 };
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -54,6 +30,7 @@ export function SubscriptionsScreen() {
   const theme = useTheme();
   const router = useRouter();
   const [items, setItems] = useState<readonly SubscriptionListItem[]>([]);
+  const [categories, setCategories] = useState<readonly CategoryOption[]>([]);
   const [search, setSearch] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("all");
   const [category, setCategory] = useState<CategoryFilter>("all");
@@ -64,10 +41,16 @@ export function SubscriptionsScreen() {
     useCallback(() => {
       let active = true;
       void getSubscriptionTracker()
-        .then((tracker) => tracker.loadSubscriptions())
-        .then((next) => {
+        .then((tracker) => Promise.all([tracker.loadSubscriptions(), tracker.loadCategories()]))
+        .then(([nextItems, nextCategories]) => {
           if (!active) return;
-          setItems(next);
+          setItems(nextItems);
+          setCategories(nextCategories);
+          setCategory((current) =>
+            current === "all" || current === "uncategorized" || nextCategories.some((item) => item.id === current)
+              ? current
+              : "all",
+          );
           setError(null);
         })
         .catch((caught: unknown) => {
@@ -83,6 +66,12 @@ export function SubscriptionsScreen() {
     }, []),
   );
 
+  const categoryFilters: readonly { readonly value: CategoryFilter; readonly label: string }[] = [
+    { value: "all", label: "Every Category" },
+    ...categories.map((item) => ({ value: item.id, label: item.name })),
+    { value: "uncategorized", label: "Uncategorized" },
+  ];
+
   const sections = useMemo(() => {
     const normalizedSearch = search.trim().toLocaleLowerCase();
     const filtered = items.filter((item) => {
@@ -91,7 +80,7 @@ export function SubscriptionsScreen() {
         lifecycle === "all" || lifecycle === "archived" || item.lifecycle === lifecycle;
       const categoryMatches =
         category === "all" ||
-        (category === "uncategorized" ? item.category === null : item.category === category);
+        (category === "uncategorized" ? item.categoryId === null : item.categoryId === category);
       return (
         archiveMatches &&
         lifecycleMatches &&
@@ -99,7 +88,7 @@ export function SubscriptionsScreen() {
         (!normalizedSearch || item.name.toLocaleLowerCase().includes(normalizedSearch))
       );
     });
-    return (["active", "cancellationPending", "paused", "canceled"] as const)
+    return (["active", "paused", "canceled"] as const)
       .map((status) => ({
         title: lifecycleLabels[status],
         data: filtered.filter((item) => item.lifecycle === status),
@@ -220,7 +209,7 @@ export function SubscriptionsScreen() {
               </View>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
                 <Text selectable style={{ color: theme.textSecondary, fontSize: 13 }}>
-                  {item.category ? categoryLabels[item.category] : "Uncategorized"} ·{" "}
+                  {item.category ?? "Uncategorized"} ·{" "}
                   {item.cycle === "monthly" ? "Monthly" : "Yearly"}
                 </Text>
                 {item.nextBillingDate ? (

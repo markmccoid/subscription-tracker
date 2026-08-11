@@ -151,14 +151,23 @@ function ChargeRow({
   const theme = useTheme();
   const urgent = groupKey === 'actionNeeded';
   const nearTerm = groupKey === 'next7Days';
+  const daysUntilRenewal = nearTerm ? calendarDaysFromToday(charge.billingDate) : null;
+  const renewalIsClose = daysUntilRenewal !== null && daysUntilRenewal < 4;
   const warmForeground = theme.scheme === 'dark' ? '#FFBF69' : '#9A5700';
-  const accent = urgent ? theme.danger : nearTerm ? warmForeground : theme.accent;
+  const accent = urgent || renewalIsClose ? theme.danger : nearTerm ? warmForeground : theme.accent;
 
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={nearTerm
+        ? `${charge.name}, ${formatCents(charge.amountCents)}, renews ${renewalDistanceLabel(daysUntilRenewal!)}`
+        : undefined}
       onPress={onPress}
-      style={({ pressed }) => [styles.chargeRow, { opacity: pressed ? 0.62 : 1 }]}>
+      style={({ pressed }) => [
+        styles.chargeRow,
+        renewalIsClose ? { backgroundColor: `${theme.danger}1F` } : null,
+        { opacity: pressed ? 0.62 : 1 },
+      ]}>
       <View style={[styles.monogram, { backgroundColor: `${accent}22` }]}>
         <Text style={[styles.monogramText, { color: accent }]}>{charge.name.slice(0, 2).toUpperCase()}</Text>
       </View>
@@ -168,7 +177,25 @@ function ChargeRow({
           {urgent ? `Due ${formatDate(charge.billingDate)}` : formatDate(charge.billingDate)}
         </Text>
       </View>
-      <Text selectable numberOfLines={1} style={[styles.chargeAmount, { color: theme.text }]}>{formatCents(charge.amountCents)}</Text>
+      <View style={styles.chargeSummary}>
+        <Text selectable numberOfLines={1} style={[styles.chargeAmount, { color: theme.text }]}>{formatCents(charge.amountCents)}</Text>
+        {daysUntilRenewal !== null ? (
+          <View
+            style={[
+              styles.renewalBadge,
+              { backgroundColor: renewalIsClose ? `${theme.danger}26` : `${warmForeground}1F` },
+            ]}>
+            <Text
+              selectable
+              style={[
+                styles.renewalBadgeText,
+                { color: renewalIsClose ? theme.danger : warmForeground },
+              ]}>
+              {renewalDistanceLabel(daysUntilRenewal).toUpperCase()}
+            </Text>
+          </View>
+        ) : null}
+      </View>
       <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.disclosure, { color: theme.textSecondary }]}>›</Text>
     </Pressable>
   );
@@ -201,6 +228,20 @@ function formatDate(value: string): string {
   return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(
     new Date(year, month - 1, day, 12),
   );
+}
+
+function calendarDaysFromToday(value: string): number {
+  const [year, month, day] = value.split('-').map(Number);
+  const today = new Date();
+  const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  const renewalUtc = Date.UTC(year, month - 1, day);
+  return Math.round((renewalUtc - todayUtc) / 86_400_000);
+}
+
+function renewalDistanceLabel(days: number): string {
+  if (days === 0) return 'Today';
+  if (days === 1) return '1 day';
+  return `${days} days`;
 }
 
 const styles = StyleSheet.create({
@@ -253,6 +294,9 @@ const styles = StyleSheet.create({
   chargeDetails: { flex: 1, minWidth: 0, gap: 3 },
   chargeName: { fontSize: 16, fontWeight: '700' },
   chargeDate: { fontSize: 13 },
+  chargeSummary: { flexShrink: 0, alignItems: 'flex-end', gap: 5 },
   chargeAmount: { flexShrink: 0, fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },
+  renewalBadge: { minHeight: 20, justifyContent: 'center', paddingHorizontal: 7, borderRadius: 10 },
+  renewalBadgeText: { fontSize: 10, fontWeight: '800', fontVariant: ['tabular-nums'], letterSpacing: 0.4 },
   disclosure: { flexShrink: 0, fontSize: 24, fontWeight: '300', lineHeight: 26 },
 });

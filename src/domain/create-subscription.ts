@@ -1,6 +1,6 @@
 import type {
   BillingCycle,
-  Category,
+  CategoryId,
   HouseholdListId,
   PaymentMethodId,
   Subscription,
@@ -25,7 +25,7 @@ export interface CreateStandardSubscriptionInput {
   readonly cycle: BillingCycle;
   readonly scheduleStartDate: string;
   readonly anchorDay?: number;
-  readonly category?: Category | null;
+  readonly categoryId?: CategoryId | null;
   readonly note?: string | null;
   readonly cancellationUrl?: string | null;
   readonly defaultPaymentMethodId?: PaymentMethodId | null;
@@ -50,7 +50,7 @@ export function createStandardSubscription(input: CreateStandardSubscriptionInpu
     id: input.id,
     householdListId: input.householdListId,
     name: nonBlank(input.name, 'Subscription name'),
-    category: input.category ?? null,
+    categoryId: input.categoryId ?? null,
     note: normalizeOptionalText(input.note, 'Subscription note', 2000),
     cancellationUrl: normalizeOptionalHttpsUrl(input.cancellationUrl),
     defaultPaymentMethodId: input.defaultPaymentMethodId ?? null,

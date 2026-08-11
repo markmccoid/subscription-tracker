@@ -1,0 +1,3 @@
+# Cancellation resolves unbilled history
+
+Canceling a Subscription will atomically mark every unresolved Billing Occurrence from its Cancellation Confirmation Date through today as a Charge Exception with the reason `Subscription canceled before charge`. We chose this over leaving those occurrences in Action Needed or collecting bulk Payment details because a user recording an already-effective cancellation expects the intervening projected charges not to remain overdue; the confirmation must list every affected occurrence and allow the user to abandon cancellation and resolve them manually first.

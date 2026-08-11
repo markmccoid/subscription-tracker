@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-const schemaVersion = 2;
+const schemaVersion = 5;
 
 export async function migrateDatabase(db: SQLiteDatabase): Promise<void> {
   await db.execAsync('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
@@ -49,7 +49,7 @@ export async function migrateDatabase(db: SQLiteDatabase): Promise<void> {
           promotional_amount_cents INTEGER CHECK (promotional_amount_cents > 0),
           trial_conversion_date TEXT,
           promotion_end_date TEXT,
-          lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN ('active','paused','cancellationPending','canceled')),
+          lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN ('active','paused','canceled')),
           pause_end_date TEXT,
           cancellation_initiated_date TEXT,
           cancellation_confirmation_date TEXT,
@@ -119,6 +119,71 @@ export async function migrateDatabase(db: SQLiteDatabase): Promise<void> {
       await transaction.execAsync(`
         CREATE UNIQUE INDEX payment_methods_name_unique_idx
         ON payment_methods (household_list_id, lower(trim(name)));
+      `);
+    }
+    if (currentVersion < 3) {
+      await transaction.execAsync(`
+        UPDATE household_lists
+        SET default_reminder_lead_days = 5
+        WHERE default_reminder_lead_days = 3;
+      `);
+    }
+    if (currentVersion < 4) {
+      await transaction.execAsync(`
+        CREATE TABLE categories (
+          id TEXT PRIMARY KEY NOT NULL,
+          household_list_id TEXT NOT NULL REFERENCES household_lists(id) ON DELETE CASCADE,
+          name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 80),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX categories_name_unique_idx
+        ON categories (household_list_id, lower(trim(name)));
+
+        ALTER TABLE subscriptions
+        ADD COLUMN category_id TEXT REFERENCES categories(id) ON DELETE SET NULL;
+
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000001', id, 'Entertainment', created_at, updated_at
+        FROM household_lists;
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000002', id, 'Finance', created_at, updated_at
+        FROM household_lists;
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000003', id, 'Health', created_at, updated_at
+        FROM household_lists;
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000004', id, 'News', created_at, updated_at
+        FROM household_lists;
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000005', id, 'Other', created_at, updated_at
+        FROM household_lists;
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000006', id, 'Software', created_at, updated_at
+        FROM household_lists;
+        INSERT INTO categories (id, household_list_id, name, created_at, updated_at)
+        SELECT '20000000-0000-4000-8000-000000000007', id, 'Utilities', created_at, updated_at
+        FROM household_lists;
+
+        UPDATE subscriptions
+        SET category_id = CASE lower(category)
+          WHEN 'entertainment' THEN '20000000-0000-4000-8000-000000000001'
+          WHEN 'finance' THEN '20000000-0000-4000-8000-000000000002'
+          WHEN 'health' THEN '20000000-0000-4000-8000-000000000003'
+          WHEN 'news' THEN '20000000-0000-4000-8000-000000000004'
+          WHEN 'other' THEN '20000000-0000-4000-8000-000000000005'
+          WHEN 'software' THEN '20000000-0000-4000-8000-000000000006'
+          WHEN 'utilities' THEN '20000000-0000-4000-8000-000000000007'
+          ELSE NULL
+        END;
+      `);
+    }
+    if (currentVersion < 5) {
+      await transaction.execAsync(`
+        UPDATE subscriptions
+        SET lifecycle_status = 'active', cancellation_initiated_date = NULL
+        WHERE lifecycle_status = 'cancellationPending';
       `);
     }
     await transaction.execAsync(`PRAGMA user_version = ${schemaVersion};`);

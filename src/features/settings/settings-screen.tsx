@@ -28,6 +28,12 @@ const sections: readonly SettingsSection[] = [
         href: '/(tabs)/(settings)/payment-methods',
       },
       {
+        title: 'Categories',
+        symbol: 'tag.fill',
+        symbolBackground: '#AF52DE',
+        href: '/(tabs)/(settings)/categories',
+      },
+      {
         title: 'Household Currency',
         symbol: 'dollarsign',
         symbolBackground: '#34C759',

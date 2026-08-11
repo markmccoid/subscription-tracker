@@ -4,7 +4,7 @@ import test from 'node:test';
 import { SQLiteHouseholdRepository } from '../../src/data/sqlite/sqlite-household-repository.ts';
 import { migrateDatabase } from '../../src/data/sqlite/schema.ts';
 import { createStandardSubscription } from '../../src/domain/create-subscription.ts';
-import { createPayment } from '../../src/domain/occurrence-resolution.ts';
+import { createChargeException, createPayment } from '../../src/domain/occurrence-resolution.ts';
 import { calendarDate, cents, entityId, utcTimestamp } from '../../src/domain/primitives.ts';
 
 const ids = {
@@ -53,14 +53,56 @@ class FakeDatabase {
   }
 }
 
-test('schema migration creates case-insensitive Payment Method uniqueness and reaches version two', async () => {
+test('schema migration creates managed Categories, removes Cancellation Pending, and reaches version five', async () => {
   const database = new FakeDatabase();
   await migrateDatabase(database);
   const transactionSql = database.calls.filter((call) => call.transaction).map((call) => call.sql).join('\n');
   assert.match(transactionSql, /CREATE TABLE payment_methods/);
   assert.match(transactionSql, /CREATE UNIQUE INDEX payment_methods_name_unique_idx/);
-  assert.match(transactionSql, /PRAGMA user_version = 2/);
+  assert.match(transactionSql, /SET default_reminder_lead_days = 5/);
+  assert.match(transactionSql, /CREATE UNIQUE INDEX categories_name_unique_idx/);
+  assert.match(transactionSql, /ADD COLUMN category_id/);
+  assert.match(transactionSql, /SET category_id = CASE lower\(category\)/);
+  assert.match(transactionSql, /WHERE lifecycle_status = 'cancellationPending'/);
+  assert.match(transactionSql, /PRAGMA user_version = 5/);
   assert.equal(database.transactionCount, 1);
+});
+
+test('canceling a Subscription and recording No Charge resolutions share one transaction', async () => {
+  const database = new FakeDatabase();
+  const repository = new SQLiteHouseholdRepository(database);
+  const active = createStandardSubscription({
+    id: ids.subscription,
+    householdListId: ids.household,
+    name: 'Example',
+    amountCents: 1200,
+    cycle: 'monthly',
+    scheduleStartDate: '2026-08-09',
+    now: '2026-08-09T15:00:00.000Z',
+  });
+  const canceled = {
+    ...active,
+    lifecycle: {
+      status: 'canceled',
+      cancellationConfirmationDate: calendarDate('2026-08-09'),
+      accessEndDate: null,
+    },
+  };
+  const exception = createChargeException({
+    id: ids.payment,
+    billingOccurrenceId: ids.occurrence,
+    reason: 'Subscription canceled before charge',
+    now: '2026-08-09T15:00:00.000Z',
+  });
+
+  await repository.saveSubscriptionCancellation(canceled, [exception]);
+
+  const transactionRuns = database.calls.filter((call) => call.method === 'run' && call.transaction);
+  assert.equal(database.transactionCount, 1);
+  assert.equal(transactionRuns.length, 3);
+  assert.match(transactionRuns[0].sql, /INSERT INTO subscriptions/);
+  assert.match(transactionRuns[1].sql, /INSERT INTO charge_exceptions/);
+  assert.match(transactionRuns[2].sql, /reminderReconciliationNeeded/);
 });
 
 test('Subscription upsert, occurrence retention, and reminder marker share one transaction', async () => {
@@ -130,6 +172,19 @@ test('Payment Method deletion clears Subscription and Payment references atomica
   assert.match(transactionRuns[0].sql, /UPDATE subscriptions SET default_payment_method_id = NULL/);
   assert.match(transactionRuns[1].sql, /UPDATE payments SET payment_method_id = NULL/);
   assert.match(transactionRuns[2].sql, /DELETE FROM payment_methods/);
+});
+
+test('Category deletion moves assigned Subscriptions to Uncategorized atomically', async () => {
+  const database = new FakeDatabase();
+  const repository = new SQLiteHouseholdRepository(database);
+
+  await repository.deleteCategory(entityId('20000000-0000-4000-8000-000000000001'));
+
+  const transactionRuns = database.calls.filter((call) => call.method === 'run' && call.transaction);
+  assert.equal(database.transactionCount, 1);
+  assert.equal(transactionRuns.length, 2);
+  assert.match(transactionRuns[0].sql, /UPDATE subscriptions SET category_id = NULL/);
+  assert.match(transactionRuns[1].sql, /DELETE FROM categories/);
 });
 
 test('Payment Method persistence upserts editable and retirement fields', async () => {

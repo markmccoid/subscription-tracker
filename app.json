@@ -2,7 +2,7 @@
   "expo": {
     "name": "subscription-tracker",
     "slug": "subscription-tracker",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "platforms": ["ios"],
     "orientation": "portrait",
     "icon": "./assets/subscription-tracker-icon.png",
@@ -10,7 +10,10 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/subscription-tracker-icon.png",
-      "bundleIdentifier": "com.markmccoid.subscription-tracker"
+      "bundleIdentifier": "com.markmccoid.subscription-tracker",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -43,6 +46,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "25f0a1f1-d8d6-401e-bb15-5b8ab4e0fe78"
+      }
     }
   }
 }

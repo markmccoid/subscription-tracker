@@ -6,18 +6,17 @@ export type BillingOccurrenceId = EntityId<'BillingOccurrence'>;
 export type PaymentId = EntityId<'Payment'>;
 export type ChargeExceptionId = EntityId<'ChargeException'>;
 export type PaymentMethodId = EntityId<'PaymentMethod'>;
+export type CategoryId = EntityId<'Category'>;
 
-export const categories = [
-  'entertainment',
-  'software',
-  'news',
-  'health',
-  'utilities',
-  'finance',
-  'other',
+export const starterCategories = [
+  { id: '20000000-0000-4000-8000-000000000001', name: 'Entertainment' },
+  { id: '20000000-0000-4000-8000-000000000002', name: 'Finance' },
+  { id: '20000000-0000-4000-8000-000000000003', name: 'Health' },
+  { id: '20000000-0000-4000-8000-000000000004', name: 'News' },
+  { id: '20000000-0000-4000-8000-000000000005', name: 'Other' },
+  { id: '20000000-0000-4000-8000-000000000006', name: 'Software' },
+  { id: '20000000-0000-4000-8000-000000000007', name: 'Utilities' },
 ] as const;
-
-export type Category = (typeof categories)[number];
 export type BillingCycle = 'monthly' | 'yearly';
 
 export interface BillingSchedule {
@@ -44,10 +43,6 @@ export type SubscriptionLifecycle =
   | { readonly status: 'active' }
   | { readonly status: 'paused'; readonly pauseEndDate: CalendarDate | null }
   | {
-      readonly status: 'cancellationPending';
-      readonly cancellationInitiatedDate: CalendarDate;
-    }
-  | {
       readonly status: 'canceled';
       readonly cancellationConfirmationDate: CalendarDate;
       readonly accessEndDate: CalendarDate | null;
@@ -57,7 +52,7 @@ export interface Subscription {
   readonly id: SubscriptionId;
   readonly householdListId: HouseholdListId;
   readonly name: string;
-  readonly category: Category | null;
+  readonly categoryId: CategoryId | null;
   readonly note: string | null;
   readonly cancellationUrl: string | null;
   readonly defaultPaymentMethodId: PaymentMethodId | null;
@@ -117,6 +112,14 @@ export interface PaymentMethod {
   readonly updatedAt: UtcTimestamp;
 }
 
+export interface Category {
+  readonly id: CategoryId;
+  readonly householdListId: HouseholdListId;
+  readonly name: string;
+  readonly createdAt: UtcTimestamp;
+  readonly updatedAt: UtcTimestamp;
+}
+
 export interface HouseholdSnapshot {
   readonly household: HouseholdList;
   readonly subscriptions: readonly Subscription[];
@@ -124,4 +127,5 @@ export interface HouseholdSnapshot {
   readonly payments: readonly Payment[];
   readonly chargeExceptions: readonly ChargeException[];
   readonly paymentMethods: readonly PaymentMethod[];
+  readonly categories: readonly Category[];
 }

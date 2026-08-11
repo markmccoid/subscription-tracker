@@ -17,7 +17,7 @@ The currency used by every monetary amount in a Household List. Version one supp
 _Avoid_: Display currency, converted currency
 
 **Monthly Commitment**:
-The normalized monthly cost of all Active and Cancellation Pending Subscriptions, including post-trial recurring amounts. A yearly amount contributes one twelfth of its value; Paused and Canceled Subscriptions contribute nothing.
+The normalized monthly cost of all Active Subscriptions, including post-trial recurring amounts. A yearly amount contributes one twelfth of its value; Paused and Canceled Subscriptions contribute nothing.
 _Avoid_: Monthly burn, amount due this month
 
 **Due in the Next 30 Days**:
@@ -113,8 +113,12 @@ A user-recorded resolution indicating that an expected Billing Occurrence did no
 _Avoid_: Deleted occurrence, payment, canceled subscription
 
 **Category**:
-An optional single classification assigned to a Subscription for spending analysis. Version one provides Entertainment, Software, News, Health, Utilities, Finance, and Other; an unassigned Subscription appears as Uncategorized.
+An optional, household-managed, case-insensitively unique classification assigned to a Subscription for spending analysis. A new Household List starts with Entertainment, Finance, Health, News, Other, Software, and Utilities; an unassigned Subscription appears as Uncategorized.
 _Avoid_: Tag, multiple categories
+
+**Uncategorized**:
+The display state of a Subscription with no assigned Category. It is not itself a Category and cannot be renamed or deleted.
+_Avoid_: Default category, category
 
 **Payment Method**:
 A reusable, case-insensitively unique user-defined name and optional note identifying how one or more Subscriptions are paid. It contains no payment credentials or financial identifiers.
@@ -141,7 +145,7 @@ The single local alert associated with a Billing Occurrence. It uses the Subscri
 _Avoid_: Billing occurrence, push notification
 
 **Default Lead Time**:
-The number of calendar days before a Billing Date when its Billing Reminder is delivered, initially three days. A value of zero means the Billing Date itself.
+The number of calendar days before a Billing Date when its Billing Reminder is delivered, initially five days. A value of zero means the Billing Date itself.
 _Avoid_: Reminder time, billing cycle
 
 **Reminder Coverage**:
@@ -160,16 +164,8 @@ _Avoid_: Reminder date, access end date
 A notification preference that suppresses alerts without changing a Subscription's billing status, Billing Occurrences, or contribution to monthly burn.
 _Avoid_: Paused subscription
 
-**Cancellation Pending**:
-A user-selected Subscription state indicating that cancellation has been initiated but not confirmed by the provider. The Subscription remains part of expected spending until confirmation; returning from a Cancellation URL never changes this state or prompts for an outcome.
-_Avoid_: Canceled
-
-**Cancellation Initiated Date**:
-The calendar date on which the user began the provider's cancellation process for a Cancellation Pending Subscription.
-_Avoid_: Cancellation Confirmation Date, Access End Date
-
 **Canceled Subscription**:
-A Subscription the user has explicitly marked as provider-confirmed, preventing future renewals. It produces no future Billing Occurrences and is excluded from Monthly Commitment, even when service access continues temporarily.
+A Subscription the user has explicitly marked as provider-confirmed, preventing future renewals. Cancellation is a direct transition with no intermediate cancellation state. It produces no future Billing Occurrences and is excluded from Monthly Commitment, even when service access continues temporarily.
 _Avoid_: Cancellation pending, expired subscription
 
 **Reactivated Subscription**:

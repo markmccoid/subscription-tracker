@@ -9,6 +9,7 @@ import { Appearance } from 'react-native';
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppearanceStore } from '@/stores/appearance-store';
+import { startNotificationSystem } from '@/notifications/billing-notifications';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -20,6 +21,21 @@ export default function RootLayout() {
   useEffect(() => {
     Appearance.setColorScheme(themeMode === 'system' ? 'unspecified' : themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void startNotificationSystem()
+      .then((cleanup) => {
+        if (disposed) cleanup();
+        else stop = cleanup;
+      })
+      .catch((caught: unknown) => console.warn('Could not initialize notifications.', caught));
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
 
   const navigationTheme: Theme = {
     ...baseTheme,
@@ -74,6 +90,28 @@ export default function RootLayout() {
           }}
         />
         <Stack.Screen
+          name="add-category"
+          options={{
+            title: 'Add Category',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.45, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="edit-category/[id]"
+          options={{
+            title: 'Edit Category',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.65, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
           name="edit-payment-method/[id]"
           options={{
             title: 'Edit Payment Method',
@@ -101,6 +139,39 @@ export default function RootLayout() {
             title: 'No Charge',
             presentation: 'formSheet',
             sheetAllowedDetents: [0.55, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="cancel-subscription/[id]"
+          options={{
+            title: 'Cancel Subscription',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.75, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="edit-cancellation/[id]"
+          options={{
+            title: 'Cancellation Details',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.65, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="reactivate-subscription/[id]"
+          options={{
+            title: 'Reactivate Subscription',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.5, 1],
             sheetGrabberVisible: true,
             headerTransparent: true,
             contentStyle: { backgroundColor: appTheme.background },

@@ -1,5 +1,5 @@
-import { PlannedScreen } from '@/components/planned-screen';
+import { NotificationsScreen } from '@/features/settings/notifications-screen';
 
 export default function NotificationsRoute() {
-  return <PlannedScreen symbol="bell" description="Authorization state, Default Lead Time, Reminder Time, and Reminder Coverage will be implemented in the notification slice." />;
+  return <NotificationsScreen />;
 }

@@ -15,7 +15,7 @@ Selecting a charge opens its Billing Occurrence, where the user can Record Payme
 
 ## Subscriptions
 
-Subscriptions shows every non-archived Subscription by default, grouped by lifecycle state: Active and Cancellation Pending first, Paused next, and Canceled last. Archived Subscriptions appear only through an explicit filter.
+Subscriptions shows every non-archived Subscription by default, grouped by lifecycle state: Active first, Paused next, and Canceled last. Archived Subscriptions appear only through an explicit filter.
 
 The root supports native name search plus lifecycle and Category filters. Each row shows the Subscription name and Category, its current recurring amount and Billing Cycle, its Next Billing Date when applicable, and a lifecycle label only when it is not Active.
 

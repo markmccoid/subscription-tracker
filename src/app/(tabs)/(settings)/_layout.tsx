@@ -9,6 +9,7 @@ export default function SettingsLayout() {
       <Stack.Screen name="index" options={{ title: 'Settings' }} />
       <Stack.Screen name="appearance" options={{ title: 'Appearance', headerLargeTitleEnabled: false }} />
       <Stack.Screen name="payment-methods" options={{ title: 'Payment Methods', headerLargeTitleEnabled: false }} />
+      <Stack.Screen name="categories" options={{ title: 'Categories', headerLargeTitleEnabled: false }} />
       <Stack.Screen name="notifications" options={{ title: 'Notifications', headerLargeTitleEnabled: false }} />
       <Stack.Screen name="data" options={{ title: 'Data', headerLargeTitleEnabled: false }} />
       <Stack.Screen name="about" options={{ title: 'About', headerLargeTitleEnabled: false }} />
