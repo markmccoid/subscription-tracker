@@ -1,6 +1,6 @@
 import { useFocusEffect, useRouter, type Href } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { getSubscriptionTracker } from '@/application/create-subscription-tracker';
 import type {
@@ -9,6 +9,7 @@ import type {
   UpcomingChargeGroupKey,
 } from '@/application/subscription-tracker';
 import { useTheme } from '@/hooks/use-theme';
+import { reconcileBillingReminders } from '@/notifications/billing-notifications';
 
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
@@ -46,6 +47,33 @@ export function SubscriptionDashboardScreen() {
     setRefreshing(true);
     await load();
     setRefreshing(false);
+  };
+
+  const planWeek = async (charge: UpcomingCharge, skipped: boolean) => {
+    try {
+      const tracker = await getSubscriptionTracker();
+      const command = { subscriptionId: charge.subscriptionId, billingDate: charge.billingDate };
+      await (skipped ? tracker.skipWeek(command) : tracker.unskipWeek(command));
+      await reconcileBillingReminders().catch(() => undefined);
+      await load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not update this week.');
+    }
+  };
+
+  const openWeekMenu = (charge: UpcomingCharge) => {
+    Alert.alert(charge.name, formatDate(charge.billingDate), [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Skip this week', onPress: () => void planWeek(charge, true) },
+      {
+        text: 'Plan weeks…',
+        onPress: () =>
+          router.push({
+            pathname: '/plan-weeks/[id]',
+            params: { id: charge.subscriptionId },
+          } as unknown as Href),
+      },
+    ]);
   };
 
   if (!dashboard && !error) {
@@ -99,7 +127,10 @@ export function SubscriptionDashboardScreen() {
                       selectable
                       style={[styles.sectionTotal, { color: theme.textSecondary }]}
                     >
-                      {formatCents(group.charges.reduce((total, charge) => total + charge.amountCents, 0))}
+                      {formatCents(group.charges.reduce(
+                        (total, charge) => total + (charge.skipped ? 0 : charge.amountCents),
+                        0,
+                      ))}
                     </Text>
                   </View>
                   <View
@@ -122,6 +153,12 @@ export function SubscriptionDashboardScreen() {
                               billingDate: charge.billingDate,
                             },
                           } as unknown as Href)}
+                          onLongPress={
+                            charge.cycle === 'weekly' && group.key !== 'actionNeeded'
+                              ? () => openWeekMenu(charge)
+                              : undefined
+                          }
+                          onResume={() => void planWeek(charge, false)}
                         />
                         {index < group.charges.length - 1 ? (
                           <View style={[styles.rowSeparator, { backgroundColor: theme.border }]} />
@@ -143,18 +180,30 @@ function ChargeRow({
   charge,
   groupKey,
   onPress,
+  onLongPress,
+  onResume,
 }: {
   readonly charge: UpcomingCharge;
   readonly groupKey: UpcomingChargeGroupKey;
   readonly onPress: () => void;
+  readonly onLongPress?: () => void;
+  readonly onResume: () => void;
 }) {
   const theme = useTheme();
+  if (charge.skipped) return <SkippedChargeRow charge={charge} onResume={onResume} />;
+  const weekly = charge.cycle === 'weekly';
   const urgent = groupKey === 'actionNeeded';
   const nearTerm = groupKey === 'next7Days';
   const daysUntilRenewal = nearTerm ? calendarDaysFromToday(charge.billingDate) : null;
   const renewalIsClose = daysUntilRenewal !== null && daysUntilRenewal < 4;
   const warmForeground = theme.scheme === 'dark' ? '#FFBF69' : '#9A5700';
-  const accent = urgent || renewalIsClose ? theme.danger : nearTerm ? warmForeground : theme.accent;
+  const accent = urgent || renewalIsClose
+    ? theme.danger
+    : weekly
+      ? theme.weekly
+      : nearTerm
+        ? warmForeground
+        : theme.accent;
 
   return (
     <Pressable
@@ -162,19 +211,33 @@ function ChargeRow({
       accessibilityLabel={nearTerm
         ? `${charge.name}, ${formatCents(charge.amountCents)}, renews ${renewalDistanceLabel(daysUntilRenewal!)}`
         : undefined}
+      accessibilityHint={onLongPress ? 'Touch and hold to skip this week or plan upcoming weeks.' : undefined}
       onPress={onPress}
+      onLongPress={onLongPress}
       style={({ pressed }) => [
         styles.chargeRow,
         renewalIsClose ? { backgroundColor: `${theme.danger}1F` } : null,
         { opacity: pressed ? 0.62 : 1 },
       ]}>
+      {weekly ? <View style={[styles.weeklyStripe, { backgroundColor: theme.weekly }]} /> : null}
       <View style={[styles.monogram, { backgroundColor: `${accent}22` }]}>
         <Text style={[styles.monogramText, { color: accent }]}>{charge.name.slice(0, 2).toUpperCase()}</Text>
       </View>
       <View style={styles.chargeDetails}>
-        <Text selectable numberOfLines={1} style={[styles.chargeName, { color: theme.text }]}>{charge.name}</Text>
+        <View style={styles.chargeNameRow}>
+          <Text selectable numberOfLines={1} style={[styles.chargeName, { color: theme.text }]}>{charge.name}</Text>
+          {weekly ? (
+            <View style={[styles.weeklyChip, { backgroundColor: theme.weeklySoft }]}>
+              <Text style={[styles.weeklyChipText, { color: theme.weekly }]}>WEEKLY</Text>
+            </View>
+          ) : null}
+        </View>
         <Text selectable numberOfLines={1} style={[styles.chargeDate, { color: theme.textSecondary }]}>
-          {urgent ? `Due ${formatDate(charge.billingDate)}` : formatDate(charge.billingDate)}
+          {urgent
+            ? `Due ${formatDate(charge.billingDate)}`
+            : weekly
+              ? `${formatDate(charge.billingDate)} · Delivery week`
+              : formatDate(charge.billingDate)}
         </Text>
       </View>
       <View style={styles.chargeSummary}>
@@ -198,6 +261,57 @@ function ChargeRow({
       </View>
       <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[styles.disclosure, { color: theme.textSecondary }]}>›</Text>
     </Pressable>
+  );
+}
+
+/** A planned Skipped Week: no charge is expected, and one tap returns the week to delivering. */
+function SkippedChargeRow({
+  charge,
+  onResume,
+}: {
+  readonly charge: UpcomingCharge;
+  readonly onResume: () => void;
+}) {
+  const theme = useTheme();
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${charge.name}, skipped week, ${formatDate(charge.billingDate)}`}
+      style={[styles.chargeRow, styles.skippedRow, { backgroundColor: theme.backgroundSelected }]}>
+      <View style={[styles.weeklyStripe, { backgroundColor: theme.weekly, opacity: 0.4 }]} />
+      <View style={[styles.monogram, { backgroundColor: `${theme.textSecondary}1A` }]}>
+        <Text style={[styles.monogramText, { color: theme.textSecondary }]}>
+          {charge.name.slice(0, 2).toUpperCase()}
+        </Text>
+      </View>
+      <View style={styles.chargeDetails}>
+        <Text selectable numberOfLines={1} style={[styles.chargeName, { color: theme.textSecondary }]}>
+          {charge.name}
+        </Text>
+        <Text selectable numberOfLines={1} style={[styles.chargeDate, { color: theme.textSecondary }]}>
+          {formatDate(charge.billingDate)} · Skipped week
+        </Text>
+      </View>
+      <View style={styles.chargeSummary}>
+        <Text
+          selectable
+          numberOfLines={1}
+          style={[styles.chargeAmount, styles.skippedAmount, { color: theme.textSecondary }]}>
+          {formatCents(charge.amountCents)}
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Resume ${charge.name} on ${formatDate(charge.billingDate)}`}
+          onPress={onResume}
+          hitSlop={8}
+          style={({ pressed }) => [
+            styles.resumePill,
+            { borderColor: theme.weekly, opacity: pressed ? 0.6 : 1 },
+          ]}>
+          <Text style={[styles.resumePillText, { color: theme.weekly }]}>RESUME</Text>
+        </Pressable>
+      </View>
+    </View>
   );
 }
 
@@ -289,10 +403,26 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
   },
+  weeklyStripe: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 3 },
+  weeklyChip: { flexShrink: 0, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
+  weeklyChipText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.6 },
+  skippedRow: { opacity: 0.85 },
+  skippedAmount: { textDecorationLine: 'line-through', fontWeight: '600' },
+  resumePill: {
+    flexShrink: 0,
+    minHeight: 24,
+    justifyContent: 'center',
+    paddingHorizontal: 9,
+    borderWidth: 1,
+    borderRadius: 14,
+    borderCurve: 'continuous',
+  },
+  resumePillText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   monogram: { width: 46, height: 46, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   monogramText: { fontSize: 14, fontWeight: '800' },
   chargeDetails: { flex: 1, minWidth: 0, gap: 3 },
-  chargeName: { fontSize: 16, fontWeight: '700' },
+  chargeNameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  chargeName: { flexShrink: 1, fontSize: 16, fontWeight: '700' },
   chargeDate: { fontSize: 13 },
   chargeSummary: { flexShrink: 0, alignItems: 'flex-end', gap: 5 },
   chargeAmount: { flexShrink: 0, fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },

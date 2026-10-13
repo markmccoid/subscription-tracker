@@ -1,12 +1,15 @@
-import type { HouseholdRepository } from './household-repository';
+import type { HouseholdRepository, SkippedWeekChanges } from './household-repository';
 import type {
   BillingOccurrence,
   Category,
   ChargeException,
   HouseholdList,
   HouseholdSnapshot,
+  LifecycleEvent,
   Payment,
   PaymentMethod,
+  SkippedWeek,
+  SkippedWeekId,
   Subscription,
 } from '@/domain/model';
 
@@ -17,6 +20,8 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
   private readonly billingOccurrences = new Map<string, BillingOccurrence>();
   private readonly payments = new Map<string, Payment>();
   private readonly chargeExceptions = new Map<string, ChargeException>();
+  private readonly lifecycleEvents = new Map<string, LifecycleEvent>();
+  private readonly skippedWeeks = new Map<string, SkippedWeek>();
   private readonly paymentMethods = new Map<string, PaymentMethod>();
   private readonly categories = new Map<string, Category>();
 
@@ -46,6 +51,8 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
       billingOccurrences: [...this.billingOccurrences.values()],
       payments: [...this.payments.values()],
       chargeExceptions: [...this.chargeExceptions.values()],
+      lifecycleEvents: [...this.lifecycleEvents.values()],
+      skippedWeeks: [...this.skippedWeeks.values()],
       paymentMethods: [...this.paymentMethods.values()],
       categories: [...this.categories.values()].sort((left, right) => left.name.localeCompare(right.name)),
     };
@@ -58,30 +65,110 @@ export class InMemoryHouseholdRepository implements HouseholdRepository {
   async saveSubscriptionWithOccurrences(
     subscription: Subscription,
     occurrences: readonly BillingOccurrence[],
+    skippedWeeks: SkippedWeekChanges = {},
   ): Promise<void> {
     this.subscriptions.set(subscription.id, subscription);
     await this.saveBillingOccurrences(occurrences);
+    this.applySkippedWeekChanges(skippedWeeks);
   }
 
-  async saveSubscriptionCancellation(
+  async deleteSubscription(subscriptionId: Subscription['id']): Promise<void> {
+    if (!this.subscriptions.has(subscriptionId)) throw new Error('Subscription not found.');
+    const occurrenceIds = new Set(
+      [...this.billingOccurrences.values()]
+        .filter((occurrence) => occurrence.subscriptionId === subscriptionId)
+        .map((occurrence) => occurrence.id),
+    );
+    for (const [id, payment] of this.payments) {
+      if (occurrenceIds.has(payment.billingOccurrenceId)) this.payments.delete(id);
+    }
+    for (const [id, exception] of this.chargeExceptions) {
+      if (occurrenceIds.has(exception.billingOccurrenceId)) this.chargeExceptions.delete(id);
+    }
+    for (const id of occurrenceIds) this.billingOccurrences.delete(id);
+    for (const [id, event] of this.lifecycleEvents) {
+      if (event.subscriptionId === subscriptionId) this.lifecycleEvents.delete(id);
+    }
+    for (const [id, skip] of this.skippedWeeks) {
+      if (skip.subscriptionId === subscriptionId) this.skippedWeeks.delete(id);
+    }
+    this.subscriptions.delete(subscriptionId);
+  }
+
+  async saveLifecycleChange(
     subscription: Subscription,
-    exceptions: readonly ChargeException[],
+    event: LifecycleEvent,
+    generatedExceptions: readonly ChargeException[] = [],
+    skippedWeeks: SkippedWeekChanges = {},
   ): Promise<void> {
-    for (const exception of exceptions) {
+    if (event.subscriptionId !== subscription.id) {
+      throw new Error('Lifecycle Event does not belong to this Subscription.');
+    }
+    const replacedIds = new Set<string>(
+      [...this.chargeExceptions.values()]
+        .filter((item) => item.generatedByLifecycleEventId === event.id)
+        .map((item) => item.id),
+    );
+    const remainingResolutions = [...this.payments.values(), ...this.chargeExceptions.values()].filter(
+      (resolution) => !replacedIds.has(resolution.id),
+    );
+    for (const exception of generatedExceptions) {
       const occurrence = this.billingOccurrences.get(exception.billingOccurrenceId);
       if (!occurrence || occurrence.subscriptionId !== subscription.id) {
-        throw new Error('Cancellation resolution does not belong to this Subscription.');
+        throw new Error('Lifecycle resolution does not belong to this Subscription.');
       }
-      if (
-        [...this.payments.values(), ...this.chargeExceptions.values()].some(
-          (resolution) => resolution.billingOccurrenceId === exception.billingOccurrenceId,
-        )
-      ) {
+      if (exception.generatedByLifecycleEventId !== event.id) {
+        throw new Error('Generated Charge Exception is not linked to its Lifecycle Event.');
+      }
+      if (remainingResolutions.some(
+        (resolution) => resolution.billingOccurrenceId === exception.billingOccurrenceId,
+      )) {
         throw new Error('Billing Occurrence has already been resolved.');
       }
     }
+    for (const id of replacedIds) this.chargeExceptions.delete(id);
     this.subscriptions.set(subscription.id, subscription);
-    for (const exception of exceptions) this.chargeExceptions.set(exception.id, exception);
+    this.lifecycleEvents.set(event.id, event);
+    for (const exception of generatedExceptions) this.chargeExceptions.set(exception.id, exception);
+    this.applySkippedWeekChanges(skippedWeeks);
+  }
+
+  async saveSkippedWeek(skippedWeek: SkippedWeek): Promise<void> {
+    const duplicate = [...this.skippedWeeks.values()].find(
+      (current) =>
+        current.id !== skippedWeek.id &&
+        current.subscriptionId === skippedWeek.subscriptionId &&
+        current.billingDate === skippedWeek.billingDate,
+    );
+    if (duplicate) throw new Error('This week is already skipped.');
+    this.skippedWeeks.set(skippedWeek.id, skippedWeek);
+  }
+
+  async deleteSkippedWeek(skippedWeekId: SkippedWeekId): Promise<void> {
+    if (!this.skippedWeeks.has(skippedWeekId)) throw new Error('Skipped Week not found.');
+    this.removeSkippedWeek(skippedWeekId);
+  }
+
+  private applySkippedWeekChanges(changes: SkippedWeekChanges): void {
+    for (const id of changes.deletedIds ?? []) this.removeSkippedWeek(id);
+    for (const skippedWeek of changes.created ?? []) this.skippedWeeks.set(skippedWeek.id, skippedWeek);
+  }
+
+  /** Mirrors the SQLite cascade from skipped_weeks to its Generated Charge Exception. */
+  private removeSkippedWeek(skippedWeekId: SkippedWeekId): void {
+    for (const [id, exception] of this.chargeExceptions) {
+      if (exception.generatedBySkippedWeekId === skippedWeekId) this.chargeExceptions.delete(id);
+    }
+    this.skippedWeeks.delete(skippedWeekId);
+  }
+
+  async deleteLifecycleEvent(eventId: LifecycleEvent['id'], subscription: Subscription): Promise<void> {
+    if (!this.lifecycleEvents.has(eventId)) throw new Error('Lifecycle Event not found.');
+    this.lifecycleEvents.delete(eventId);
+    for (const [id, exception] of this.chargeExceptions) {
+      if (exception.generatedByLifecycleEventId === eventId) this.chargeExceptions.delete(id);
+    }
+    this.subscriptions.set(subscription.id, subscription);
   }
 
   async saveBillingOccurrences(occurrences: readonly BillingOccurrence[]): Promise<void> {

@@ -8,14 +8,18 @@ import type {
 } from './model';
 import {
   calendarDate,
-  calendarParts,
   cents,
   nonBlank,
   utcTimestamp,
   type UtcTimestamp,
 } from './primitives';
-import { validatePricing, validateSchedule } from './recurrence';
-import { normalizeOptionalText, normalizeOptionalHttpsUrl, validateReminderLeadDays } from './subscription-profile';
+import { anchorDayFor, validatePricing, validateSchedule } from './recurrence';
+import {
+  normalizeOptionalText,
+  normalizeOptionalHttpsUrl,
+  showSkippedWeeksFor,
+  validateReminderLeadDays,
+} from './subscription-profile';
 
 export interface CreateStandardSubscriptionInput {
   readonly id: SubscriptionId;
@@ -31,6 +35,7 @@ export interface CreateStandardSubscriptionInput {
   readonly defaultPaymentMethodId?: PaymentMethodId | null;
   readonly reminderLeadDaysOverride?: number | null;
   readonly notificationsMuted?: boolean;
+  readonly showSkippedWeeks?: boolean;
   readonly now: string;
 }
 
@@ -39,7 +44,7 @@ export function createStandardSubscription(input: CreateStandardSubscriptionInpu
   const schedule = validateSchedule({
     cycle: input.cycle,
     startDate,
-    anchorDay: input.anchorDay ?? calendarParts(startDate).day,
+    anchorDay: anchorDayFor(input.cycle, startDate, input.anchorDay),
   });
   const pricing = validatePricing(schedule, {
     kind: 'standard',
@@ -59,6 +64,7 @@ export function createStandardSubscription(input: CreateStandardSubscriptionInpu
     lifecycle: { status: 'active' },
     reminderLeadDaysOverride: validateReminderLeadDays(input.reminderLeadDaysOverride),
     notificationsMuted: input.notificationsMuted ?? false,
+    showSkippedWeeks: showSkippedWeeksFor(input.cycle, input.showSkippedWeeks),
     archivedAt: null,
     createdAt: timestamp,
     updatedAt: timestamp,

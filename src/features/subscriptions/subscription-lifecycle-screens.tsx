@@ -298,6 +298,148 @@ export function ReactivateSubscriptionScreen({ id }: { readonly id: Subscription
   );
 }
 
+export function PauseSubscriptionScreen({ id }: { readonly id: SubscriptionId }) {
+  const theme = useTheme();
+  const router = useRouter();
+  const [today] = useState(startOfToday);
+  const [effectiveDate, setEffectiveDate] = useState(today);
+  const [hasPauseEndDate, setHasPauseEndDate] = useState(false);
+  const [pauseEndDate, setPauseEndDate] = useState(tomorrow);
+  const [detail, setDetail] = useState<SubscriptionDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void getSubscriptionTracker()
+      .then((tracker) => tracker.loadSubscriptionDetail(id))
+      .then((next) => {
+        if (next.lifecycle.status !== 'active') throw new Error('Only an Active Subscription can be paused.');
+        setDetail(next);
+      })
+      .catch((caught: unknown) => setError(errorMessage(caught, 'Could not load this Subscription.')));
+  }, [id]);
+
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const tracker = await getSubscriptionTracker();
+      await tracker.pauseSubscription({
+        subscriptionId: id,
+        effectiveDate: localCalendarDate(effectiveDate),
+        pauseEndDate: hasPauseEndDate ? localCalendarDate(pauseEndDate) : null,
+      });
+      await cancelBillingRemindersForSubscription(id).catch(() => undefined);
+      router.back();
+    } catch (caught) {
+      setError(errorMessage(caught, 'Could not pause this Subscription.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Stack.Toolbar placement="left"><Stack.Toolbar.Button onPress={() => router.back()}>Cancel</Stack.Toolbar.Button></Stack.Toolbar>
+      <Stack.Toolbar placement="right">
+        <Stack.Toolbar.Button disabled={saving || !detail} onPress={() => void submit()} variant="prominent">
+          {saving ? 'Saving…' : 'Pause'}
+        </Stack.Toolbar.Button>
+      </Stack.Toolbar>
+      <Host style={{ flex: 1 }} seedColor={theme.accent}>
+        <Form>
+          <Section title={detail?.name ?? 'Subscription'} footer={<Text>No Billing Occurrences or reminders are produced while paused.</Text>}>
+            <DatePicker
+              title="Effective Date"
+              selection={effectiveDate}
+              displayedComponents={['date']}
+              range={{ end: today }}
+              onDateChange={(date) => {
+                const next = atNoon(date);
+                setEffectiveDate(next);
+                if (pauseEndDate <= next) {
+                  const end = new Date(next);
+                  end.setDate(end.getDate() + 1);
+                  setPauseEndDate(atNoon(end));
+                }
+              }}
+            />
+            <Toggle label="Plan Resume Date" isOn={hasPauseEndDate} onIsOnChange={setHasPauseEndDate} />
+            {hasPauseEndDate ? (
+              <DatePicker
+                title="Resume Date"
+                selection={pauseEndDate}
+                displayedComponents={['date']}
+                range={{ start: dayAfter(effectiveDate) }}
+                onDateChange={(date) => setPauseEndDate(atNoon(date))}
+              />
+            ) : null}
+          </Section>
+          {error ? <Section><Text modifiers={[foregroundStyle('red')]}>{error}</Text></Section> : null}
+        </Form>
+      </Host>
+    </>
+  );
+}
+
+export function ResumeSubscriptionScreen({ id }: { readonly id: SubscriptionId }) {
+  const theme = useTheme();
+  const router = useRouter();
+  const [minimumDate] = useState(tomorrow);
+  const [nextBillingDate, setNextBillingDate] = useState(() => clampedNextMonth(new Date()));
+  const [detail, setDetail] = useState<SubscriptionDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void getSubscriptionTracker()
+      .then((tracker) => tracker.loadSubscriptionDetail(id))
+      .then((next) => {
+        if (next.lifecycle.status !== 'paused') throw new Error('Only a Paused Subscription can be resumed.');
+        setDetail(next);
+      })
+      .catch((caught: unknown) => setError(errorMessage(caught, 'Could not load this Subscription.')));
+  }, [id]);
+
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const tracker = await getSubscriptionTracker();
+      await tracker.resumeSubscription({ subscriptionId: id, nextBillingDate: localCalendarDate(nextBillingDate) });
+      await reconcileBillingReminders().catch(() => undefined);
+      router.back();
+    } catch (caught) {
+      setError(errorMessage(caught, 'Could not resume this Subscription.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Stack.Toolbar placement="left"><Stack.Toolbar.Button onPress={() => router.back()}>Cancel</Stack.Toolbar.Button></Stack.Toolbar>
+      <Stack.Toolbar placement="right">
+        <Stack.Toolbar.Button disabled={saving || !detail} onPress={() => void submit()} variant="prominent">
+          {saving ? 'Saving…' : 'Resume'}
+        </Stack.Toolbar.Button>
+      </Stack.Toolbar>
+      <Host style={{ flex: 1 }} seedColor={theme.accent}>
+        <Form>
+          <Section title={detail?.name ?? 'Subscription'} footer={<Text>Resuming establishes a new billing schedule and Billing Anchor Day.</Text>}>
+            <DatePicker
+              title="Next Billing Date"
+              selection={nextBillingDate}
+              displayedComponents={['date']}
+              range={{ start: minimumDate }}
+              onDateChange={(date) => setNextBillingDate(atNoon(date))}
+            />
+          </Section>
+          {error ? <Section><Text modifiers={[foregroundStyle('red')]}>{error}</Text></Section> : null}
+        </Form>
+      </Host>
+    </>
+  );
+}
+
 function dateFromCalendar(value: string): Date {
   const { year, month, day } = calendarParts(calendarDate(value));
   return new Date(year, month - 1, day, 12);
@@ -309,6 +451,12 @@ function startOfToday(): Date {
 
 function tomorrow(): Date {
   const date = startOfToday();
+  date.setDate(date.getDate() + 1);
+  return date;
+}
+
+function dayAfter(value: Date): Date {
+  const date = atNoon(value);
   date.setDate(date.getDate() + 1);
   return date;
 }

@@ -17,16 +17,32 @@ The currency used by every monetary amount in a Household List. Version one supp
 _Avoid_: Display currency, converted currency
 
 **Monthly Commitment**:
-The normalized monthly cost of all Active Subscriptions, including post-trial recurring amounts. A yearly amount contributes one twelfth of its value; Paused and Canceled Subscriptions contribute nothing.
+The normalized monthly cost of all Active Subscriptions, including post-trial recurring amounts. A yearly amount contributes one twelfth of its value; a weekly amount contributes 52/12 of its value, and planned Skipped Weeks do not reduce it. Paused and Canceled Subscriptions contribute nothing.
 _Avoid_: Monthly burn, amount due this month
 
 **Due in the Next 30 Days**:
-The sum of Billing Occurrences expected during the next rolling 30 days, without normalizing their billing cycles.
+The sum of Billing Occurrences expected during the next rolling 30 days, without normalizing their billing cycles. Skipped Weeks are excluded.
 _Avoid_: Monthly commitment, calendar-month spend
 
 **Recorded Spend**:
 The sum of user-confirmed Payments in a selected period, using each Payment's actual amount and Payment Date. Subscription edits and projected Billing Occurrences do not rewrite Recorded Spend.
 _Avoid_: Expected spend, Monthly Commitment
+
+**Subscription Activity**:
+The chronological history of Payments, Charge Exceptions, and Lifecycle Events across the Household List. Each item is placed by its effective Activity Date and may be filtered by activity type without splitting records into separate histories.
+_Avoid_: Payment history, billing history, audit log
+
+**Activity Date**:
+The calendar date that places an item in Subscription Activity: Payment Date for a Payment, Billing Date for a Charge Exception, and the effective transition date for a Lifecycle Event. The timestamp at which the user recorded the item is retained separately.
+_Avoid_: Created date, recorded timestamp
+
+**Lifecycle Event**:
+A retained record that a Subscription was paused, resumed, canceled, or reactivated, including the dates and subscription terms relevant to that transition. It remains part of Subscription Activity after the current lifecycle state changes, but is removed with the rest of the history when the Subscription is permanently deleted.
+_Avoid_: Status, Charge Exception, payment event
+
+**Spending Breakdown**:
+Recorded Spend grouped by Subscription or Category using each Subscription's current name and Category assignment. Renaming or recategorizing a Subscription may therefore regroup earlier Payments without changing total Recorded Spend.
+_Avoid_: Historical attribution, snapshotted category
 
 **Subscription**:
 A recurring financial commitment tracked by the user, including the terms used to predict future charges.
@@ -37,7 +53,7 @@ A Subscription expected to continue producing Billing Occurrences. It is the def
 _Avoid_: Enabled subscription, current subscription
 
 **Minimum Subscription**:
-A valid Subscription containing a nonblank name, a positive recurring amount, a Monthly or Yearly Billing Cycle, and a user-selected Next Billing Date. Trial Subscriptions use their Trial Conversion Date as the Next Billing Date.
+A valid Subscription containing a nonblank name, a positive recurring amount, a Monthly, Yearly, or Weekly Billing Cycle, and a user-selected Next Billing Date. Trial Subscriptions use their Trial Conversion Date as the Next Billing Date.
 _Avoid_: Draft subscription, guessed schedule
 
 **Pricing Arrangement**:
@@ -81,8 +97,20 @@ The first Billing Date on which a Promotional Subscription is charged its Standa
 _Avoid_: Last discounted date, cancellation date
 
 **Billing Cycle**:
-The cadence at which a Subscription produces Billing Occurrences. Version one supports Monthly and Yearly cycles only.
+The cadence at which a Subscription produces Billing Occurrences. Supports Monthly, Yearly, and Weekly cycles.
 _Avoid_: Notification frequency, payment history
+
+**Weekly Billing Cycle**:
+A Billing Cycle producing one Billing Occurrence every seven days on the weekday of the Billing Schedule Start Date. Billing Anchor Day does not apply to Weekly schedules.
+_Avoid_: Delivery schedule, meal plan
+
+**Skipped Week**:
+A user-planned suppression of one projected weekly Billing Occurrence. A future Skipped Week may be freely created or removed; once its Billing Date passes it is retained and resolved by a Generated Charge Exception.
+_Avoid_: Paused Subscription, Charge Exception, canceled week
+
+**Week Planner**:
+The surface listing a weekly Subscription's upcoming Billing Occurrences where each week is toggled between delivering and skipped. Changes apply immediately without a separate save step.
+_Avoid_: Calendar, pause screen
 
 **Billing Schedule Start Date**:
 The first Billing Date from which a Subscription's current recurring schedule is projected. Establishing or resetting a schedule requires the user to select this date.
@@ -111,6 +139,10 @@ _Avoid_: Billing date, confirmation date
 **Charge Exception**:
 A user-recorded resolution indicating that an expected Billing Occurrence did not result in a charge. It may include a reason, does not alter future scheduling, and cannot coexist with a Payment for the same occurrence.
 _Avoid_: Deleted occurrence, payment, canceled subscription
+
+**Generated Charge Exception**:
+A Charge Exception created as an atomic consequence of a Lifecycle Event and linked to that event. Correcting or deleting the Lifecycle Event reconciles only its Generated Charge Exceptions and never alters user-recorded Charge Exceptions.
+_Avoid_: Manual exception, inferred no-charge month
 
 **Category**:
 An optional, household-managed, case-insensitively unique classification assigned to a Subscription for spending analysis. A new Household List starts with Entertainment, Finance, Health, News, Other, Software, and Utilities; an unassigned Subscription appears as Uncategorized.

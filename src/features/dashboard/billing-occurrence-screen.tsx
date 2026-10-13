@@ -1,12 +1,13 @@
 import { useFocusEffect, useRouter, type Href } from 'expo-router';
 import * as Linking from 'expo-linking';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { getSubscriptionTracker } from '@/application/create-subscription-tracker';
 import type { BillingOccurrenceDetail } from '@/application/subscription-tracker';
-import type { SubscriptionId } from '@/domain/model';
+import type { SkippedWeekId, SubscriptionId } from '@/domain/model';
 import { useTheme } from '@/hooks/use-theme';
+import { reconcileBillingReminders } from '@/notifications/billing-notifications';
 
 export function BillingOccurrenceScreen({
   subscriptionId,
@@ -20,23 +21,20 @@ export function BillingOccurrenceScreen({
   const [detail, setDetail] = useState<BillingOccurrenceDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const load = useCallback(async () => {
+    try {
+      const tracker = await getSubscriptionTracker();
+      setDetail(await tracker.loadBillingOccurrenceDetail(subscriptionId, billingDate));
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not load this Billing Occurrence.');
+    }
+  }, [billingDate, subscriptionId]);
+
   useFocusEffect(
     useCallback(() => {
-      let active = true;
-      void getSubscriptionTracker()
-        .then((tracker) => tracker.loadBillingOccurrenceDetail(subscriptionId, billingDate))
-        .then((next) => {
-          if (!active) return;
-          setDetail(next);
-          setError(null);
-        })
-        .catch((caught: unknown) => {
-          if (active) setError(caught instanceof Error ? caught.message : 'Could not load this Billing Occurrence.');
-        });
-      return () => {
-        active = false;
-      };
-    }, [billingDate, subscriptionId]),
+      void load();
+    }, [load]),
   );
 
   if (!detail && !error) {
@@ -61,7 +59,13 @@ export function BillingOccurrenceScreen({
             <Text selectable style={[styles.date, { color: theme.textSecondary }]}>Expected {formatDate(detail.billingDate)}</Text>
           </View>
 
-          {detail.resolution.kind === 'unresolved' ? (
+          {skipGeneratedWeekId(detail) ? (
+            <SkippedWeekResolution
+              skippedWeekId={skipGeneratedWeekId(detail)!}
+              onRemoved={load}
+              onError={setError}
+            />
+          ) : detail.resolution.kind === 'unresolved' ? (
             <View style={styles.actions}>
               <Pressable
                 accessibilityRole="button"
@@ -134,6 +138,67 @@ export function BillingOccurrenceScreen({
         </>
       ) : null}
     </ScrollView>
+  );
+}
+
+function skipGeneratedWeekId(detail: BillingOccurrenceDetail): SkippedWeekId | null {
+  return detail.resolution.kind === 'noCharge' ? detail.resolution.generatedBySkippedWeekId : null;
+}
+
+/** A week the user planned as skipped, with the reconciliation path for "they charged me anyway". */
+function SkippedWeekResolution({
+  skippedWeekId,
+  onRemoved,
+  onError,
+}: {
+  readonly skippedWeekId: SkippedWeekId;
+  readonly onRemoved: () => Promise<void>;
+  readonly onError: (message: string) => void;
+}) {
+  const theme = useTheme();
+  const confirmRemove = () => {
+    Alert.alert(
+      'Remove Skip?',
+      'This week will return to Action Needed so you can record what actually happened.',
+      [
+        { text: 'Keep Skip', style: 'cancel' },
+        {
+          text: 'Remove Skip',
+          style: 'destructive',
+          onPress: () => {
+            void getSubscriptionTracker()
+              .then((tracker) => tracker.removeMaterializedSkip({ skippedWeekId }))
+              .then(() => reconcileBillingReminders().catch(() => undefined))
+              .then(() => onRemoved())
+              .catch((caught: unknown) =>
+                onError(caught instanceof Error ? caught.message : 'Could not remove this skip.'),
+              );
+          },
+        },
+      ],
+    );
+  };
+
+  return (
+    <View style={styles.actions}>
+      <View style={[styles.resolutionCard, { backgroundColor: theme.backgroundElement }]}>
+        <Text selectable style={[styles.resolutionTitle, { color: theme.text }]}>
+          Not charged · Skipped week
+        </Text>
+        <Text selectable style={[styles.explanation, { color: theme.textSecondary }]}>
+          You planned this delivery week as skipped, so no charge was expected.
+        </Text>
+      </View>
+      <Pressable
+        accessibilityRole="button"
+        onPress={confirmRemove}
+        style={({ pressed }) => [
+          styles.secondaryButton,
+          { borderColor: theme.danger, backgroundColor: theme.backgroundElement, opacity: pressed ? 0.72 : 1 },
+        ]}>
+        <Text style={[styles.secondaryButtonText, { color: theme.danger }]}>Remove Skip</Text>
+      </Pressable>
+    </View>
   );
 }
 

@@ -16,6 +16,9 @@ export const Colors = {
     textSecondary: '#60646C',
     border: '#D8D9DF',
     danger: '#C62828',
+    /** Reserved for the Weekly Billing Cycle treatment in Upcoming. */
+    weekly: '#1B7A3E',
+    weeklySoft: '#E7F5EC',
   },
   dark: {
     text: '#ffffff',
@@ -25,6 +28,8 @@ export const Colors = {
     textSecondary: '#B0B4BA',
     border: '#3A3D45',
     danger: '#FF6B6B',
+    weekly: '#5CD68A',
+    weeklySoft: '#16301F',
   },
 } as const;
 

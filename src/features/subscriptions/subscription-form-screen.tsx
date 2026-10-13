@@ -1,4 +1,5 @@
 import {
+  Button,
   DatePicker,
   DisclosureGroup,
   Form,
@@ -54,9 +55,14 @@ interface FormValues {
   readonly reminderChoice: ReminderChoice;
   readonly reminderDays: string;
   readonly notificationsMuted: boolean;
+  readonly showSkippedWeeks: boolean;
+  readonly initialSkippedDates: readonly string[];
   readonly note: string;
   readonly cancellationUrl: string;
 }
+
+/** How many projected weeks the creation form offers to pre-plan. */
+const initialWeekCount = 4;
 
 export function AddSubscriptionScreen() {
   const initialDate = clampedNextMonth(new Date());
@@ -74,6 +80,8 @@ export function AddSubscriptionScreen() {
         reminderChoice: 'default',
         reminderDays: '3',
         notificationsMuted: false,
+        showSkippedWeeks: true,
+        initialSkippedDates: [],
         note: '',
         cancellationUrl: '',
       }}
@@ -104,6 +112,8 @@ export function EditSubscriptionScreen({ detail }: { readonly detail: Subscripti
         reminderChoice,
         reminderDays: String(override ?? detail.householdReminderLeadDays),
         notificationsMuted: detail.notificationsMuted,
+        showSkippedWeeks: detail.showSkippedWeeks,
+        initialSkippedDates: [],
         note: detail.note ?? '',
         cancellationUrl: detail.cancellationUrl ?? '',
       }}
@@ -139,6 +149,8 @@ function SubscriptionForm({
   const [reminderChoice, setReminderChoice] = useState(initial.reminderChoice);
   const [reminderDays, setReminderDays] = useState(initial.reminderDays);
   const [notificationsMuted, setNotificationsMuted] = useState(initial.notificationsMuted);
+  const [showSkippedWeeks, setShowSkippedWeeks] = useState(initial.showSkippedWeeks);
+  const [initialSkippedDates, setInitialSkippedDates] = useState(initial.initialSkippedDates);
   const [note, setNote] = useState(initial.note);
   const [cancellationUrl, setCancellationUrl] = useState(initial.cancellationUrl);
   const [additionalExpanded, setAdditionalExpanded] = useState(mode === 'edit' && Boolean(initial.note || initial.cancellationUrl));
@@ -162,9 +174,13 @@ function SubscriptionForm({
     reminderChoice,
     reminderDays,
     notificationsMuted,
+    showSkippedWeeks,
+    initialSkippedDates,
     note,
     cancellationUrl,
   };
+  const weekly = cycle === 'weekly';
+  const plannableWeeks = weekly && mode === 'add' ? projectedWeeks(billingDate, initialWeekCount) : [];
   const dirty = serializeValues(values) !== serializeValues(initial);
   const validation = validateForm(values, mode, detail);
   const saveDisabled = saving || !dirty || validation !== null;
@@ -295,6 +311,8 @@ function SubscriptionForm({
             : cycle === 'monthly'
               ? Number(anchorDay)
               : billingDate.getDate(),
+        initialSkippedDates: weekly && mode === 'add' ? initialSkippedDates : undefined,
+        showSkippedWeeks: weekly ? showSkippedWeeks : undefined,
         defaultPaymentMethodId,
         reminderLeadDaysOverride:
           reminderChoice === 'default'
@@ -332,7 +350,7 @@ function SubscriptionForm({
     const candidate = result.candidate;
     Alert.alert(
       'Possible Duplicate',
-      `${candidate.name} · ${formatCents(candidate.amountCents)} · ${candidate.cycle === 'monthly' ? 'Monthly' : 'Yearly'} · ${candidate.nextBillingDate}`,
+      `${candidate.name} · ${formatCents(candidate.amountCents)} · ${cycleLabel(candidate.cycle)} · ${candidate.nextBillingDate}`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -396,6 +414,7 @@ function SubscriptionForm({
               selection={cycle}
               onSelectionChange={(next) => {
                 setCycle(next);
+                setInitialSkippedDates([]);
                 if (next !== initial.cycle && mode === 'edit') {
                   const reset = clampedNextMonth(new Date());
                   setBillingDate(reset);
@@ -406,12 +425,18 @@ function SubscriptionForm({
               modifiers={[pickerStyle('segmented'), disabled(!pricingEditable || !scheduleEditable)]}>
               <Text modifiers={[tag('monthly')]}>Monthly</Text>
               <Text modifiers={[tag('yearly')]}>Yearly</Text>
+              <Text modifiers={[tag('weekly')]}>Weekly</Text>
             </Picker>
+            {mode === 'edit' && initial.cycle === 'weekly' && cycle !== 'weekly' ? (
+              <Text modifiers={[foregroundStyle(theme.danger)]}>
+                Future skipped weeks will be removed.
+              </Text>
+            ) : null}
           </Section>
 
-          <Section title="Billing Schedule" footer={<Text>{scheduleEditable ? 'Days missing from a month use that month’s final day.' : 'The schedule changes when this Subscription is resumed or reactivated.'}</Text>}>
+          <Section title="Billing Schedule" footer={<Text>{scheduleFooter(cycle, billingDate, scheduleEditable)}</Text>}>
             <DatePicker
-              title={mode === 'add' ? 'First Billing Date' : 'Next Billing Date'}
+              title={mode === 'add' || weekly ? 'First Billing Date' : 'Next Billing Date'}
               selection={billingDate}
               range={{ start: startOfToday() }}
               displayedComponents={['date']}
@@ -419,6 +444,7 @@ function SubscriptionForm({
                 setBillingDate(date);
                 setAnchorDay(String(date.getDate()));
                 anchorState.set(String(date.getDate()));
+                setInitialSkippedDates([]);
               }}
               modifiers={[disabled(!scheduleEditable)]}
             />
@@ -433,6 +459,47 @@ function SubscriptionForm({
             ) : null}
             {changeSummary ? <Text modifiers={[foregroundStyle(theme.textSecondary)]}>{changeSummary}</Text> : null}
           </Section>
+
+          {weekly ? (
+            mode === 'add' ? (
+              <Section
+                title="PLAN THE FIRST WEEKS"
+                footer={<Text>Tap a week to skip it. You can change any upcoming week later in the Week Planner.</Text>}>
+                {plannableWeeks.map((week) => (
+                  <Toggle
+                    key={week}
+                    label={`${formatWeekLabel(week)} — ${initialSkippedDates.includes(week) ? 'Skip' : 'Deliver'}`}
+                    isOn={!initialSkippedDates.includes(week)}
+                    onIsOnChange={(deliver) =>
+                      setInitialSkippedDates((current) =>
+                        deliver ? current.filter((date) => date !== week) : [...current, week],
+                      )
+                    }
+                  />
+                ))}
+              </Section>
+            ) : (
+              <Section footer={<Text>The Week Planner is the single place to change upcoming weeks.</Text>}>
+                <Button
+                  onPress={() => {
+                    allowExit.current = true;
+                    router.push({ pathname: '/plan-weeks/[id]' as never, params: { id: detail!.id } });
+                  }}>
+                  <Text>Plan Weeks…</Text>
+                </Button>
+              </Section>
+            )
+          ) : null}
+
+          {weekly ? (
+            <Section footer={<Text>Skipped weeks appear dimmed in Upcoming with a one-tap Resume.</Text>}>
+              <Toggle
+                label="Show skipped weeks in Upcoming"
+                isOn={showSkippedWeeks}
+                onIsOnChange={setShowSkippedWeeks}
+              />
+            </Section>
+          ) : null}
 
           <Section title="Payment">
             <Picker<string>
@@ -541,7 +608,7 @@ function validateForm(values: FormValues, mode: 'add' | 'edit', detail?: Subscri
   const scheduleChanged = detail
     ? values.cycle !== detail.schedule.cycle ||
       localCalendarDate(values.billingDate) !== (detail.nextBillingDate ?? detail.schedule.startDate) ||
-      Number(values.anchorDay) !== detail.schedule.anchorDay
+      (values.cycle !== 'weekly' && Number(values.anchorDay) !== detail.schedule.anchorDay)
     : true;
   if (scheduleChanged && values.billingDate < minimum) {
     return mode === 'add' ? 'First Billing Date cannot be in the past.' : 'Next Billing Date must be after today.';
@@ -572,7 +639,36 @@ export function parseDollarsToCents(value: string): number {
 }
 
 function serializeValues(values: FormValues): string {
-  return JSON.stringify({ ...values, billingDate: localCalendarDate(values.billingDate) });
+  return JSON.stringify({
+    ...values,
+    billingDate: localCalendarDate(values.billingDate),
+    initialSkippedDates: [...values.initialSkippedDates].sort(),
+  });
+}
+
+/** The first projected weekly Billing Dates, matching the domain's startDate + 7n projection. */
+function projectedWeeks(startDate: Date, count: number): readonly string[] {
+  return Array.from({ length: count }, (_, index) => {
+    const week = new Date(startDate);
+    week.setDate(week.getDate() + 7 * index);
+    return localCalendarDate(week);
+  });
+}
+
+function formatWeekLabel(value: string): string {
+  const { year, month, day } = calendarParts(calendarDate(value));
+  return new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(
+    new Date(year, month - 1, day, 12),
+  );
+}
+
+function scheduleFooter(cycle: BillingCycle, billingDate: Date, editable: boolean): string {
+  if (!editable) return 'The schedule changes when this Subscription is resumed or reactivated.';
+  if (cycle === 'weekly') {
+    const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(billingDate);
+    return `Bills every ${weekday}, projected from the first date.`;
+  }
+  return 'Days missing from a month use that month’s final day.';
 }
 
 function describeNextChargeChange(detail: SubscriptionDetail, values: FormValues): string | null {
@@ -591,6 +687,10 @@ function describeNextChargeChange(detail: SubscriptionDetail, values: FormValues
 
 function formatCents(value: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value / 100);
+}
+
+function cycleLabel(cycle: BillingCycle): string {
+  return cycle === 'monthly' ? 'Monthly' : cycle === 'yearly' ? 'Yearly' : 'Weekly';
 }
 
 function dateFromCalendar(value: string): Date {

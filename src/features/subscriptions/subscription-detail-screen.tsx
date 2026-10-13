@@ -1,12 +1,13 @@
 import { Stack, useFocusEffect, useRouter } from "expo-router";
 import * as Linking from "expo-linking";
 import { useCallback, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, ScrollView, Text, View } from "react-native";
 
 import { getSubscriptionTracker } from "@/application/create-subscription-tracker";
-import type { SubscriptionDetail } from "@/application/subscription-tracker";
-import type { SubscriptionId } from "@/domain/model";
+import type { HistoryActivityItem, SubscriptionDetail } from "@/application/subscription-tracker";
+import type { LifecycleEventId, SubscriptionId } from "@/domain/model";
 import { useTheme } from "@/hooks/use-theme";
+import { cancelBillingRemindersForSubscription } from "@/notifications/billing-notifications";
 
 const lifecycleLabels = {
   active: "Active",
@@ -16,20 +17,32 @@ const lifecycleLabels = {
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 
-export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }) {
+type LifecycleActivity = Extract<HistoryActivityItem, { kind: 'paused' | 'resumed' | 'canceled' | 'reactivated' }>;
+
+export function SubscriptionDetailScreen({ id, highlightedEventId }: {
+  readonly id: SubscriptionId;
+  readonly highlightedEventId?: LifecycleEventId;
+}) {
   const theme = useTheme();
   const router = useRouter();
   const [detail, setDetail] = useState<SubscriptionDetail | null>(null);
+  const [lifecycleEvents, setLifecycleEvents] = useState<readonly LifecycleActivity[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       void getSubscriptionTracker()
-        .then((tracker) => tracker.loadSubscriptionDetail(id))
-        .then((next) => {
+        .then((tracker) => Promise.all([
+          tracker.loadSubscriptionDetail(id),
+          tracker.loadHistory({ subscriptionId: id }),
+        ]))
+        .then(([next, history]) => {
           if (!active) return;
           setDetail(next);
+          setLifecycleEvents(history.activities.filter(
+            (item): item is LifecycleActivity => item.kind !== 'payment' && item.kind !== 'noCharge',
+          ));
           setError(null);
         })
         .catch((caught: unknown) => {
@@ -77,6 +90,31 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
 
   const amount = detail.pricing.standardAmount;
   const canEdit = !detail.archived && detail.pricing.kind === "standard";
+  const confirmDelete = () => {
+    Alert.alert(
+      "Delete Subscription?",
+      `“${detail.name}” and all of its Payments, No Charge records, and lifecycle history will be permanently deleted. This cannot be undone.`,
+      [
+        { text: "Keep Subscription", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            setError(null);
+            void getSubscriptionTracker()
+              .then((tracker) => tracker.deleteSubscription(detail.id))
+              .then(() => cancelBillingRemindersForSubscription(detail.id).catch(() => undefined))
+              .then(() => router.dismissTo("/(tabs)/(subscriptions)"))
+              .catch((caught: unknown) =>
+                setError(
+                  caught instanceof Error ? caught.message : "Could not delete this Subscription.",
+                ),
+              );
+          },
+        },
+      ],
+    );
+  };
 
   return (
     <>
@@ -127,7 +165,7 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
           >
             {money.format(amount / 100)}{" "}
             <Text style={{ color: theme.textSecondary, fontSize: 15, fontWeight: "500" }}>
-              {detail.schedule.cycle === "monthly" ? "monthly" : "yearly"}
+              {cycleAdverb(detail.schedule.cycle)}
             </Text>
           </Text>
           {detail.lifecycle.status === "canceled" ? (
@@ -137,12 +175,58 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
                 ? ` · Access through ${formatDate(detail.lifecycle.accessEndDate)}`
                 : ""}
             </Text>
+          ) : detail.lifecycle.status === "paused" ? (
+            <Text selectable style={{ color: theme.textSecondary }}>
+              {detail.lifecycle.pauseEndDate
+                ? `Paused through ${formatDate(detail.lifecycle.pauseEndDate)}`
+                : "Paused indefinitely"}
+            </Text>
           ) : detail.nextBillingDate ? (
             <Text selectable style={{ color: theme.textSecondary }}>
-              Next expected charge {formatDate(detail.nextBillingDate)}
+              {detail.schedule.cycle === "weekly" ? "Next delivery" : "Next expected charge"}{" "}
+              {formatDate(detail.nextBillingDate)}
             </Text>
           ) : null}
         </View>
+
+        {lifecycleEvents.length ? (
+          <View style={{ padding: 18, borderRadius: 20, borderCurve: "continuous", gap: 12, backgroundColor: theme.backgroundElement }}>
+            <Text selectable style={{ color: theme.textSecondary, fontSize: 12, fontWeight: "700", letterSpacing: 0.7 }}>
+              LIFECYCLE HISTORY
+            </Text>
+            {lifecycleEvents.map((event, index) => (
+              <View
+                key={event.id}
+                style={{
+                  padding: 12,
+                  gap: 5,
+                  borderRadius: 14,
+                  borderCurve: "continuous",
+                  borderWidth: highlightedEventId === event.id ? 2 : 0,
+                  borderColor: theme.accent,
+                  backgroundColor: highlightedEventId === event.id ? theme.accentMuted : theme.background,
+                }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <Text selectable style={{ flex: 1, color: theme.text, fontWeight: "700" }}>
+                    {lifecycleEventTitle(event.kind)} · {formatDate(event.activityDate)}
+                  </Text>
+                  {event.kind === 'canceled' && index === 0 && detail.lifecycle.status === 'canceled' ? (
+                    <Pressable onPress={() => router.push({ pathname: "/edit-cancellation/[id]", params: { id: detail.id } })}>
+                      <Text selectable style={{ color: theme.accent, fontWeight: "700" }}>Edit</Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable onPress={() => confirmDeleteLifecycleEvent(event.id as LifecycleEventId, detail.id, detail.name, router, setError)}>
+                    <Text selectable style={{ color: theme.danger, fontWeight: "700" }}>Delete</Text>
+                  </Pressable>
+                </View>
+                <Text selectable style={{ color: theme.textSecondary, fontSize: 13 }}>
+                  {lifecycleEventSummary(event)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
 
         <DetailSection
           title="Profile"
@@ -160,11 +244,20 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
         <DetailSection
           title="Billing Schedule"
           theme={theme}
-          rows={[
-            ["Cycle", detail.schedule.cycle === "monthly" ? "Monthly" : "Yearly"],
-            ["Schedule Start", formatDate(detail.schedule.startDate)],
-            ["Billing Day", String(detail.schedule.anchorDay)],
-          ]}
+          rows={
+            detail.schedule.cycle === "weekly"
+              ? [
+                  ["Cycle", `Weekly · every ${weekdayName(detail.schedule.startDate)}`],
+                  ["Schedule Start", formatDate(detail.schedule.startDate)],
+                  ["Next Delivery", detail.nextBillingDate ? formatDate(detail.nextBillingDate) : "None"],
+                  ["Skipped Weeks", detail.showSkippedWeeks ? "Shown in Upcoming" : "Hidden in Upcoming"],
+                ]
+              : [
+                  ["Cycle", detail.schedule.cycle === "monthly" ? "Monthly" : "Yearly"],
+                  ["Schedule Start", formatDate(detail.schedule.startDate)],
+                  ["Billing Day", String(detail.schedule.anchorDay)],
+                ]
+          }
         />
         <DetailSection
           title="Reminders"
@@ -221,37 +314,64 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
             ) : null}
           </View>
         ) : null}
-        {!detail.archived ? (
-          <View style={{ gap: 10 }}>
-            {detail.lifecycle.status === "canceled" ? (
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          {!detail.archived ? (
+            detail.lifecycle.status === "canceled" ? (
               <>
                 <LifecycleButton
-                  label="Edit Cancellation Details"
+                  label="Edit Cancel"
                   onPress={() =>
                     router.push({ pathname: "/edit-cancellation/[id]", params: { id: detail.id } })
                   }
                   theme={theme}
                 />
                 <LifecycleButton
-                  label="Reactivate Subscription"
+                  label="Reactivate"
                   onPress={() =>
                     router.push({ pathname: "/reactivate-subscription/[id]", params: { id: detail.id } })
                   }
                   theme={theme}
                 />
               </>
+            ) : detail.lifecycle.status === "paused" ? (
+              <>
+                <LifecycleButton
+                  label="Resume Sub"
+                  onPress={() => router.push({ pathname: "/resume-subscription/[id]" as never, params: { id: detail.id } })}
+                  theme={theme}
+                />
+                <LifecycleButton
+                  label="Cancel Sub"
+                  destructive
+                  onPress={() => router.push({ pathname: "/cancel-subscription/[id]", params: { id: detail.id } })}
+                  theme={theme}
+                />
+              </>
             ) : (
-              <LifecycleButton
-                label="Mark as Canceled"
-                destructive
-                onPress={() =>
-                  router.push({ pathname: "/cancel-subscription/[id]", params: { id: detail.id } })
-                }
-                theme={theme}
-              />
-            )}
-          </View>
-        ) : null}
+              <>
+                {detail.schedule.cycle === "weekly" ? (
+                  <LifecycleButton
+                    label="Plan Weeks"
+                    onPress={() => router.push({ pathname: "/plan-weeks/[id]" as never, params: { id: detail.id } })}
+                    theme={theme}
+                  />
+                ) : null}
+                <LifecycleButton
+                  label="Pause Sub"
+                  onPress={() => router.push({ pathname: "/pause-subscription/[id]" as never, params: { id: detail.id } })}
+                  theme={theme}
+                />
+                <LifecycleButton
+                  label="Cancel Sub"
+                  destructive
+                  onPress={() => router.push({ pathname: "/cancel-subscription/[id]", params: { id: detail.id } })}
+                  theme={theme}
+                />
+              </>
+            )
+          ) : null}
+          <LifecycleButton label="Delete Sub" destructive onPress={confirmDelete} theme={theme} />
+        </View>
         <DetailSection
           title="Record"
           theme={theme}
@@ -270,6 +390,42 @@ export function SubscriptionDetailScreen({ id }: { readonly id: SubscriptionId }
   );
 }
 
+function confirmDeleteLifecycleEvent(
+  eventId: LifecycleEventId,
+  subscriptionId: SubscriptionId,
+  subscriptionName: string,
+  router: ReturnType<typeof useRouter>,
+  setError: (value: string | null) => void,
+) {
+  Alert.alert(
+    "Delete Lifecycle Event?",
+    `This corrects ${subscriptionName} history and may change its current status or restore overdue charges.`,
+    [
+      { text: "Keep Event", style: "cancel" },
+      {
+        text: "Delete Event",
+        style: "destructive",
+        onPress: () => {
+          void getSubscriptionTracker()
+            .then((tracker) => tracker.deleteLifecycleEvent(eventId))
+            .then(() => router.replace({ pathname: "/(tabs)/(subscriptions)/[id]", params: { id: subscriptionId } }))
+            .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Could not delete Lifecycle Event."));
+        },
+      },
+    ],
+  );
+}
+
+function lifecycleEventTitle(kind: LifecycleActivity['kind']): string {
+  return kind === 'paused' ? 'Paused' : kind === 'resumed' ? 'Resumed' : kind === 'canceled' ? 'Canceled' : 'Reactivated';
+}
+
+function lifecycleEventSummary(event: LifecycleActivity): string {
+  if (event.kind === 'paused') return event.pauseEndDate ? `Planned through ${formatDate(event.pauseEndDate)}` : 'No planned end date';
+  if (event.kind === 'canceled') return event.accessEndDate ? `Access through ${formatDate(event.accessEndDate)}` : 'Provider confirmed';
+  return event.nextBillingDate ? `Next billing ${formatDate(event.nextBillingDate)}` : '';
+}
+
 function LifecycleButton({
   label,
   onPress,
@@ -286,6 +442,7 @@ function LifecycleButton({
       accessibilityRole="button"
       onPress={onPress}
       style={({ pressed }) => ({
+        flex: 1,
         minHeight: 52,
         alignItems: "center",
         justifyContent: "center",
@@ -297,7 +454,12 @@ function LifecycleButton({
         opacity: pressed ? 0.72 : 1,
       })}
     >
-      <Text selectable style={{ color: destructive ? theme.danger : theme.accent, fontSize: 17, fontWeight: "700" }}>
+      <Text
+        selectable
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        style={{ color: destructive ? theme.danger : theme.accent, fontSize: 15, fontWeight: "700" }}
+      >
         {label}
       </Text>
     </Pressable>
@@ -343,6 +505,17 @@ function DetailSection({
         </View>
       ))}
     </View>
+  );
+}
+
+function cycleAdverb(cycle: SubscriptionDetail["schedule"]["cycle"]): string {
+  return cycle === "monthly" ? "monthly" : cycle === "yearly" ? "yearly" : "per week";
+}
+
+function weekdayName(value: string): string {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(
+    new Date(year, month - 1, day, 12),
   );
 }
 

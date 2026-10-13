@@ -1,5 +1,5 @@
 import type { ChargeException, Payment } from './model';
-import { calendarDate, cents, utcTimestamp } from './primitives';
+import { calendarDate, cents, DomainValidationError, utcTimestamp } from './primitives';
 import { normalizeOptionalText } from './subscription-profile';
 
 export function createPayment(input: {
@@ -28,13 +28,22 @@ export function createChargeException(input: {
   readonly id: ChargeException['id'];
   readonly billingOccurrenceId: ChargeException['billingOccurrenceId'];
   readonly reason?: string | null;
+  readonly generatedByLifecycleEventId?: ChargeException['generatedByLifecycleEventId'];
+  readonly generatedBySkippedWeekId?: ChargeException['generatedBySkippedWeekId'];
   readonly now: string;
 }): ChargeException {
   const timestamp = utcTimestamp(input.now);
+  if (input.generatedByLifecycleEventId && input.generatedBySkippedWeekId) {
+    throw new DomainValidationError(
+      'A Generated Charge Exception belongs to either a Lifecycle Event or a Skipped Week.',
+    );
+  }
   return {
     id: input.id,
     billingOccurrenceId: input.billingOccurrenceId,
     reason: normalizeOptionalText(input.reason, 'No Charge reason', 500),
+    generatedByLifecycleEventId: input.generatedByLifecycleEventId ?? null,
+    generatedBySkippedWeekId: input.generatedBySkippedWeekId ?? null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };

@@ -1,10 +1,8 @@
-import { PlannedScreen } from '@/components/planned-screen';
+import { useLocalSearchParams } from 'expo-router';
+
+import { SubscriptionHistoryScreen } from '@/features/history/subscription-history-screen';
 
 export default function HistoryRoute() {
-  return (
-    <PlannedScreen
-      symbol="clock.arrow.circlepath"
-      description="Recorded Spend totals and chronological Payment history will be implemented after Payment persistence."
-    />
-  );
+  const { from, to } = useLocalSearchParams<{ from?: string; to?: string }>();
+  return <SubscriptionHistoryScreen key={`${from ?? ''}:${to ?? ''}`} customFrom={from} customTo={to} />;
 }

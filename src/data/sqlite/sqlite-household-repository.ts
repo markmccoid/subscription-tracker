@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 
-import type { HouseholdRepository } from '@/data/household-repository';
+import type { HouseholdRepository, SkippedWeekChanges } from '@/data/household-repository';
 import {
   type BillingOccurrence,
   type Category,
@@ -9,10 +9,14 @@ import {
   type ChargeExceptionId,
   type HouseholdList,
   type HouseholdSnapshot,
+  type LifecycleEvent,
+  type LifecycleEventId,
   type Payment,
   type PaymentId,
   type PaymentMethod,
   type PaymentMethodId,
+  type SkippedWeek,
+  type SkippedWeekId,
   type Subscription,
 } from '@/domain/model';
 import {
@@ -44,7 +48,7 @@ type SubscriptionRow = {
   note: string | null;
   cancellation_url: string | null;
   default_payment_method_id: string | null;
-  billing_cycle: 'monthly' | 'yearly';
+  billing_cycle: 'monthly' | 'yearly' | 'weekly';
   schedule_start_date: string;
   billing_anchor_day: number;
   pricing_kind: 'standard' | 'trial' | 'promotion';
@@ -59,9 +63,17 @@ type SubscriptionRow = {
   access_end_date: string | null;
   reminder_lead_days_override: number | null;
   notifications_muted: number;
+  show_skipped_weeks: number;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type SkippedWeekRow = {
+  id: string;
+  subscription_id: string;
+  billing_date: string;
+  created_at: string;
 };
 
 type OccurrenceRow = {
@@ -105,6 +117,25 @@ type ChargeExceptionRow = {
   id: string;
   billing_occurrence_id: string;
   reason: string | null;
+  generated_by_lifecycle_event_id: string | null;
+  generated_by_skipped_week_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type LifecycleEventRow = {
+  id: string;
+  subscription_id: string;
+  kind: 'paused' | 'resumed' | 'canceled' | 'reactivated';
+  effective_date: string;
+  pause_end_date: string | null;
+  next_billing_date: string | null;
+  access_end_date: string | null;
+  pricing_kind: 'standard' | 'trial' | 'promotion' | null;
+  standard_amount_cents: number | null;
+  promotional_amount_cents: number | null;
+  trial_conversion_date: string | null;
+  promotion_end_date: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -150,13 +181,19 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
   async loadSnapshot(): Promise<HouseholdSnapshot> {
     const household = await this.getHousehold();
     if (!household) throw new Error('Household List has not been initialized.');
-    const [subscriptionRows, occurrenceRows, paymentRows, exceptionRows, paymentMethodRows, categoryRows] = await Promise.all([
+    const [subscriptionRows, occurrenceRows, paymentRows, exceptionRows, lifecycleEventRows, skippedWeekRows, paymentMethodRows, categoryRows] = await Promise.all([
       this.db.getAllAsync<SubscriptionRow>('SELECT * FROM subscriptions ORDER BY name COLLATE NOCASE'),
       this.db.getAllAsync<OccurrenceRow>(
         'SELECT * FROM billing_occurrences ORDER BY billing_date, subscription_id',
       ),
       this.db.getAllAsync<PaymentRow>('SELECT * FROM payments ORDER BY payment_date DESC, created_at DESC'),
       this.db.getAllAsync<ChargeExceptionRow>('SELECT * FROM charge_exceptions ORDER BY created_at DESC'),
+      this.db.getAllAsync<LifecycleEventRow>(
+        'SELECT * FROM lifecycle_events ORDER BY effective_date DESC, created_at DESC',
+      ),
+      this.db.getAllAsync<SkippedWeekRow>(
+        'SELECT * FROM skipped_weeks ORDER BY subscription_id, billing_date',
+      ),
       this.db.getAllAsync<PaymentMethodRow>(
         'SELECT * FROM payment_methods ORDER BY name COLLATE NOCASE',
       ),
@@ -168,6 +205,8 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
       billingOccurrences: occurrenceRows.map(occurrenceFromRow),
       payments: paymentRows.map(paymentFromRow),
       chargeExceptions: exceptionRows.map(chargeExceptionFromRow),
+      lifecycleEvents: lifecycleEventRows.map(lifecycleEventFromRow),
+      skippedWeeks: skippedWeekRows.map(skippedWeekFromRow),
       paymentMethods: paymentMethodRows.map(paymentMethodFromRow),
       categories: categoryRows.map(categoryFromRow),
     };
@@ -180,36 +219,61 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
   async saveSubscriptionWithOccurrences(
     subscription: Subscription,
     occurrences: readonly BillingOccurrence[],
+    skippedWeeks: SkippedWeekChanges = {},
   ): Promise<void> {
     await this.db.withExclusiveTransactionAsync(async (transaction) => {
       await upsertSubscription(transaction, subscription);
       for (const occurrence of occurrences) {
         await insertOccurrence(transaction, occurrence);
       }
+      await applySkippedWeekChanges(transaction, skippedWeeks);
       await transaction.runAsync(
         `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
       );
     });
   }
 
-  async saveSubscriptionCancellation(
+  async deleteSubscription(subscriptionId: Subscription['id']): Promise<void> {
+    await this.db.withExclusiveTransactionAsync(async (transaction) => {
+      const result = await transaction.runAsync(
+        'DELETE FROM subscriptions WHERE id = ?',
+        subscriptionId,
+      );
+      if (result.changes === 0) throw new Error('Subscription not found.');
+      await transaction.runAsync(
+        `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
+      );
+    });
+  }
+
+  async saveLifecycleChange(
     subscription: Subscription,
-    exceptions: readonly ChargeException[],
+    event: LifecycleEvent,
+    generatedExceptions: readonly ChargeException[] = [],
+    skippedWeeks: SkippedWeekChanges = {},
   ): Promise<void> {
     await this.db.withExclusiveTransactionAsync(async (transaction) => {
       await upsertSubscription(transaction, subscription);
-      for (const exception of exceptions) {
-        await transaction.runAsync(
-          `INSERT INTO charge_exceptions
-           (id, billing_occurrence_id, reason, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)`,
-          exception.id,
-          exception.billingOccurrenceId,
-          exception.reason,
-          exception.createdAt,
-          exception.updatedAt,
-        );
+      await upsertLifecycleEvent(transaction, event);
+      await transaction.runAsync(
+        'DELETE FROM charge_exceptions WHERE generated_by_lifecycle_event_id = ?',
+        event.id,
+      );
+      for (const exception of generatedExceptions) {
+        await insertChargeException(transaction, exception);
       }
+      await applySkippedWeekChanges(transaction, skippedWeeks);
+      await transaction.runAsync(
+        `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
+      );
+    });
+  }
+
+  async deleteLifecycleEvent(eventId: LifecycleEventId, subscription: Subscription): Promise<void> {
+    await this.db.withExclusiveTransactionAsync(async (transaction) => {
+      const result = await transaction.runAsync('DELETE FROM lifecycle_events WHERE id = ?', eventId);
+      if (result.changes === 0) throw new Error('Lifecycle Event not found.');
+      await upsertSubscription(transaction, subscription);
       await transaction.runAsync(
         `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
       );
@@ -222,6 +286,28 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
       for (const occurrence of occurrences) {
         await insertOccurrence(transaction, occurrence);
       }
+    });
+  }
+
+  async saveSkippedWeek(skippedWeek: SkippedWeek): Promise<void> {
+    await this.db.withExclusiveTransactionAsync(async (transaction) => {
+      await insertSkippedWeek(transaction, skippedWeek);
+      await transaction.runAsync(
+        `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
+      );
+    });
+  }
+
+  async deleteSkippedWeek(skippedWeekId: SkippedWeekId): Promise<void> {
+    await this.db.withExclusiveTransactionAsync(async (transaction) => {
+      const result = await transaction.runAsync(
+        'DELETE FROM skipped_weeks WHERE id = ?',
+        skippedWeekId,
+      );
+      if (result.changes === 0) throw new Error('Skipped Week not found.');
+      await transaction.runAsync(
+        `UPDATE device_state SET value = 'true' WHERE key = 'reminderReconciliationNeeded'`,
+      );
     });
   }
 
@@ -303,16 +389,7 @@ export class SQLiteHouseholdRepository implements HouseholdRepository {
           resolution.updatedAt,
         );
       } else {
-        await transaction.runAsync(
-          `INSERT INTO charge_exceptions
-           (id, billing_occurrence_id, reason, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)`,
-          resolution.id,
-          resolution.billingOccurrenceId,
-          resolution.reason,
-          resolution.createdAt,
-          resolution.updatedAt,
-        );
+        await insertChargeException(transaction, resolution);
       }
     });
   }
@@ -380,9 +457,19 @@ function subscriptionFromRow(row: SubscriptionRow): Subscription {
     lifecycle,
     reminderLeadDaysOverride: row.reminder_lead_days_override,
     notificationsMuted: row.notifications_muted === 1,
+    showSkippedWeeks: row.show_skipped_weeks === 1,
     archivedAt: row.archived_at ? utcTimestamp(row.archived_at) : null,
     createdAt: utcTimestamp(row.created_at),
     updatedAt: utcTimestamp(row.updated_at),
+  };
+}
+
+function skippedWeekFromRow(row: SkippedWeekRow): SkippedWeek {
+  return {
+    id: entityId<'SkippedWeek'>(row.id) as SkippedWeekId,
+    subscriptionId: entityId<'Subscription'>(row.subscription_id),
+    billingDate: calendarDate(row.billing_date),
+    createdAt: utcTimestamp(row.created_at),
   };
 }
 
@@ -438,8 +525,54 @@ function chargeExceptionFromRow(row: ChargeExceptionRow): ChargeException {
     id: entityId<'ChargeException'>(row.id) as ChargeExceptionId,
     billingOccurrenceId: entityId<'BillingOccurrence'>(row.billing_occurrence_id),
     reason: row.reason,
+    generatedByLifecycleEventId: row.generated_by_lifecycle_event_id
+      ? entityId<'LifecycleEvent'>(row.generated_by_lifecycle_event_id) as LifecycleEventId
+      : null,
+    generatedBySkippedWeekId: row.generated_by_skipped_week_id
+      ? entityId<'SkippedWeek'>(row.generated_by_skipped_week_id) as SkippedWeekId
+      : null,
     createdAt: utcTimestamp(row.created_at),
     updatedAt: utcTimestamp(row.updated_at),
+  };
+}
+
+function lifecycleEventFromRow(row: LifecycleEventRow): LifecycleEvent {
+  const common = {
+    id: entityId<'LifecycleEvent'>(row.id) as LifecycleEventId,
+    subscriptionId: entityId<'Subscription'>(row.subscription_id),
+    effectiveDate: calendarDate(row.effective_date),
+    createdAt: utcTimestamp(row.created_at),
+    updatedAt: utcTimestamp(row.updated_at),
+  };
+  if (row.kind === 'paused') {
+    return { ...common, kind: 'paused', pauseEndDate: nullableDate(row.pause_end_date) };
+  }
+  if (row.kind === 'resumed') {
+    return { ...common, kind: 'resumed', nextBillingDate: requiredDate(row.next_billing_date, 'next billing') };
+  }
+  if (row.kind === 'canceled') {
+    return { ...common, kind: 'canceled', accessEndDate: nullableDate(row.access_end_date) };
+  }
+  const standardAmount = cents(requiredNumber(row.standard_amount_cents, 'standard amount'));
+  const pricing = row.pricing_kind === 'trial'
+    ? {
+        kind: 'trial' as const,
+        trialConversionDate: requiredDate(row.trial_conversion_date, 'trial conversion'),
+        standardAmount,
+      }
+    : row.pricing_kind === 'promotion'
+      ? {
+          kind: 'promotion' as const,
+          promotionalAmount: cents(requiredNumber(row.promotional_amount_cents, 'promotional amount')),
+          promotionEndDate: requiredDate(row.promotion_end_date, 'promotion end'),
+          standardAmount,
+        }
+      : { kind: 'standard' as const, standardAmount };
+  return {
+    ...common,
+    kind: 'reactivated',
+    nextBillingDate: requiredDate(row.next_billing_date, 'next billing'),
+    pricing,
   };
 }
 
@@ -459,6 +592,87 @@ async function insertOccurrence(
   );
 }
 
+async function insertChargeException(
+  database: Pick<SQLiteDatabase, 'runAsync'>,
+  exception: ChargeException,
+): Promise<void> {
+  await database.runAsync(
+    `INSERT INTO charge_exceptions
+     (id, billing_occurrence_id, reason, generated_by_lifecycle_event_id,
+      generated_by_skipped_week_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    exception.id,
+    exception.billingOccurrenceId,
+    exception.reason,
+    exception.generatedByLifecycleEventId,
+    exception.generatedBySkippedWeekId,
+    exception.createdAt,
+    exception.updatedAt,
+  );
+}
+
+async function insertSkippedWeek(
+  database: Pick<SQLiteDatabase, 'runAsync'>,
+  skippedWeek: SkippedWeek,
+): Promise<void> {
+  await database.runAsync(
+    `INSERT INTO skipped_weeks (id, subscription_id, billing_date, created_at)
+     VALUES (?, ?, ?, ?)`,
+    skippedWeek.id,
+    skippedWeek.subscriptionId,
+    skippedWeek.billingDate,
+    skippedWeek.createdAt,
+  );
+}
+
+async function applySkippedWeekChanges(
+  database: Pick<SQLiteDatabase, 'runAsync'>,
+  changes: SkippedWeekChanges,
+): Promise<void> {
+  for (const id of changes.deletedIds ?? []) {
+    await database.runAsync('DELETE FROM skipped_weeks WHERE id = ?', id);
+  }
+  for (const skippedWeek of changes.created ?? []) {
+    await insertSkippedWeek(database, skippedWeek);
+  }
+}
+
+async function upsertLifecycleEvent(
+  database: Pick<SQLiteDatabase, 'runAsync'>,
+  event: LifecycleEvent,
+): Promise<void> {
+  const pricing = event.kind === 'reactivated' ? event.pricing : null;
+  await database.runAsync(
+    `INSERT INTO lifecycle_events (
+      id, subscription_id, kind, effective_date, pause_end_date, next_billing_date,
+      access_end_date, pricing_kind, standard_amount_cents, promotional_amount_cents,
+      trial_conversion_date, promotion_end_date, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      kind=excluded.kind, effective_date=excluded.effective_date,
+      pause_end_date=excluded.pause_end_date, next_billing_date=excluded.next_billing_date,
+      access_end_date=excluded.access_end_date, pricing_kind=excluded.pricing_kind,
+      standard_amount_cents=excluded.standard_amount_cents,
+      promotional_amount_cents=excluded.promotional_amount_cents,
+      trial_conversion_date=excluded.trial_conversion_date,
+      promotion_end_date=excluded.promotion_end_date, updated_at=excluded.updated_at`,
+    event.id,
+    event.subscriptionId,
+    event.kind,
+    event.effectiveDate,
+    event.kind === 'paused' ? event.pauseEndDate : null,
+    event.kind === 'resumed' || event.kind === 'reactivated' ? event.nextBillingDate : null,
+    event.kind === 'canceled' ? event.accessEndDate : null,
+    pricing?.kind ?? null,
+    pricing?.standardAmount ?? null,
+    pricing?.kind === 'promotion' ? pricing.promotionalAmount : null,
+    pricing?.kind === 'trial' ? pricing.trialConversionDate : null,
+    pricing?.kind === 'promotion' ? pricing.promotionEndDate : null,
+    event.createdAt,
+    event.updatedAt,
+  );
+}
+
 async function upsertSubscription(
   database: Pick<SQLiteDatabase, 'runAsync'>,
   subscription: Subscription,
@@ -469,13 +683,15 @@ async function upsertSubscription(
       billing_cycle, schedule_start_date, billing_anchor_day, pricing_kind, standard_amount_cents,
       promotional_amount_cents, trial_conversion_date, promotion_end_date, lifecycle_status,
       pause_end_date, cancellation_initiated_date, cancellation_confirmation_date, access_end_date,
-      reminder_lead_days_override, notifications_muted, archived_at, created_at, updated_at
+      reminder_lead_days_override, notifications_muted, show_skipped_weeks, archived_at,
+      created_at, updated_at
     ) VALUES (
       $id, $household_list_id, $name, NULL, $category_id, $note, $cancellation_url, $default_payment_method_id,
       $billing_cycle, $schedule_start_date, $billing_anchor_day, $pricing_kind, $standard_amount_cents,
       $promotional_amount_cents, $trial_conversion_date, $promotion_end_date, $lifecycle_status,
       $pause_end_date, $cancellation_initiated_date, $cancellation_confirmation_date, $access_end_date,
-      $reminder_lead_days_override, $notifications_muted, $archived_at, $created_at, $updated_at
+      $reminder_lead_days_override, $notifications_muted, $show_skipped_weeks, $archived_at,
+      $created_at, $updated_at
     ) ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, category=NULL, category_id=excluded.category_id, note=excluded.note,
       cancellation_url=excluded.cancellation_url, default_payment_method_id=excluded.default_payment_method_id,
@@ -489,7 +705,8 @@ async function upsertSubscription(
       cancellation_confirmation_date=excluded.cancellation_confirmation_date,
       access_end_date=excluded.access_end_date,
       reminder_lead_days_override=excluded.reminder_lead_days_override,
-      notifications_muted=excluded.notifications_muted, archived_at=excluded.archived_at,
+      notifications_muted=excluded.notifications_muted,
+      show_skipped_weeks=excluded.show_skipped_weeks, archived_at=excluded.archived_at,
       updated_at=excluded.updated_at`,
     subscriptionToRow(subscription),
   );
@@ -522,6 +739,7 @@ function subscriptionToRow(subscription: Subscription): Record<string, string | 
     $access_end_date: lifecycle.status === 'canceled' ? lifecycle.accessEndDate : null,
     $reminder_lead_days_override: subscription.reminderLeadDaysOverride,
     $notifications_muted: subscription.notificationsMuted ? 1 : 0,
+    $show_skipped_weeks: subscription.showSkippedWeeks ? 1 : 0,
     $archived_at: subscription.archivedAt,
     $created_at: subscription.createdAt,
     $updated_at: subscription.updatedAt,

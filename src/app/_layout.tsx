@@ -177,6 +177,50 @@ export default function RootLayout() {
             contentStyle: { backgroundColor: appTheme.background },
           }}
         />
+        <Stack.Screen
+          name="history-range"
+          options={{
+            title: 'Custom Range',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.5, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="pause-subscription/[id]"
+          options={{
+            title: 'Pause Subscription',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.65, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="resume-subscription/[id]"
+          options={{
+            title: 'Resume Subscription',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.5, 1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
+        <Stack.Screen
+          name="plan-weeks/[id]"
+          options={{
+            title: 'Week Planner',
+            presentation: 'formSheet',
+            sheetAllowedDetents: [1],
+            sheetGrabberVisible: true,
+            headerTransparent: true,
+            contentStyle: { backgroundColor: appTheme.background },
+          }}
+        />
       </Stack>
     </ThemeProvider>
   );

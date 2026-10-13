@@ -57,6 +57,34 @@ export function compareCalendarDates(left: CalendarDate, right: CalendarDate): n
   return left.localeCompare(right);
 }
 
+const weekdayNames = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+] as const;
+
+export function addCalendarDays(date: CalendarDate, count: number): CalendarDate {
+  if (!Number.isInteger(count)) {
+    throw new DomainValidationError('Calendar day offsets must be whole days.');
+  }
+  const { year, month, day } = calendarParts(date);
+  const shifted = new Date(Date.UTC(year, month - 1, day + count));
+  return formatCalendarDate(
+    shifted.getUTCFullYear(),
+    shifted.getUTCMonth() + 1,
+    shifted.getUTCDate(),
+  );
+}
+
+export function calendarWeekdayName(date: CalendarDate): string {
+  const { year, month, day } = calendarParts(date);
+  return weekdayNames[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+}
+
 export function cents(value: number): Cents {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new DomainValidationError('Money must be a positive safe integer number of cents.');

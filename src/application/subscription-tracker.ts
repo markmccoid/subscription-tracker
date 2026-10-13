@@ -7,20 +7,32 @@ import type {
   BillingOccurrenceId,
   CategoryId,
   ChargeExceptionId,
+  LifecycleEvent,
+  LifecycleEventId,
   HouseholdList,
   HouseholdListId,
   PaymentId,
   PaymentMethodId,
   PricingArrangement,
+  SkippedWeek,
+  SkippedWeekId,
   Subscription,
   SubscriptionLifecycle,
   SubscriptionId,
 } from '@/domain/model';
 import { starterCategories } from '@/domain/model';
+import {
+  createCancellationEvent,
+  createPauseEvent,
+  createReactivationEvent,
+  createResumeEvent,
+} from '@/domain/lifecycle-event';
 import { createChargeException, createPayment } from '@/domain/occurrence-resolution';
 import {
+  addCalendarDays,
   calendarDate,
   calendarParts,
+  calendarWeekdayName,
   cents,
   compareCalendarDates,
   entityId,
@@ -31,9 +43,17 @@ import {
 } from '@/domain/primitives';
 import {
   amountForOccurrence,
+  anchorDayFor,
   nextOccurrenceOnOrAfter,
   occurrencesInRange,
 } from '@/domain/recurrence';
+import {
+  assertSkipRemovable,
+  createSkippedWeek,
+  isDateSkipped,
+  staleFutureSkips,
+  type SkipResolution,
+} from '@/domain/week-skips';
 import {
   createPaymentMethod,
   setPaymentMethodRetired,
@@ -43,7 +63,9 @@ import {
 import {
   cancelSubscription as markSubscriptionCanceled,
   editCancellationDetails as updateCancellationDetails,
+  pauseSubscription as markSubscriptionPaused,
   reactivateSubscription as returnSubscriptionToActive,
+  resumeSubscription as returnPausedSubscriptionToActive,
 } from '@/domain/subscription-lifecycle';
 
 export interface TrackerDependencies {
@@ -64,6 +86,10 @@ export interface AddStandardSubscriptionCommand {
   readonly defaultPaymentMethodId?: PaymentMethodId | null;
   readonly reminderLeadDaysOverride?: number | null;
   readonly notificationsMuted?: boolean;
+  /** Weekly only: projected Billing Dates to pre-plan as Skipped Weeks. */
+  readonly initialSkippedDates?: readonly string[];
+  /** Weekly only: show Skipped Weeks as ghost rows in Upcoming. Defaults on for Weekly. */
+  readonly showSkippedWeeks?: boolean;
   readonly savePossibleDuplicate?: boolean;
 }
 
@@ -131,6 +157,7 @@ export interface SubscriptionDetail {
   readonly reminderLeadDaysOverride: number | null;
   readonly householdReminderLeadDays: number;
   readonly notificationsMuted: boolean;
+  readonly showSkippedWeeks: boolean;
   readonly archived: boolean;
   readonly nextBillingDate: CalendarDate | null;
   readonly createdAt: string;
@@ -144,6 +171,9 @@ export interface UpcomingCharge {
   readonly billingDate: CalendarDate;
   readonly amountCents: number;
   readonly category: string | null;
+  readonly cycle: BillingCycle;
+  /** Ghost rows for planned Skipped Weeks. They never count toward any total. */
+  readonly skipped: boolean;
 }
 
 export type UpcomingChargeGroupKey =
@@ -172,7 +202,12 @@ export type BillingOccurrenceResolution =
       readonly paymentMethodName: string | null;
       readonly note: string | null;
     }
-  | { readonly kind: 'noCharge'; readonly reason: string | null };
+  | {
+      readonly kind: 'noCharge';
+      readonly reason: string | null;
+      /** Set when a planned Skipped Week generated this resolution, enabling Remove Skip. */
+      readonly generatedBySkippedWeekId: SkippedWeekId | null;
+    };
 
 export interface BillingOccurrenceDetail {
   readonly billingOccurrenceId: BillingOccurrenceId | null;
@@ -209,6 +244,118 @@ export type EditCancellationDetailsCommand = CancelSubscriptionCommand;
 export interface ReactivateSubscriptionCommand {
   readonly subscriptionId: SubscriptionId;
   readonly nextBillingDate: string;
+}
+
+export interface PauseSubscriptionCommand {
+  readonly subscriptionId: SubscriptionId;
+  readonly effectiveDate: string;
+  readonly pauseEndDate?: string | null;
+}
+
+export interface ResumeSubscriptionCommand {
+  readonly subscriptionId: SubscriptionId;
+  readonly nextBillingDate: string;
+}
+
+export interface PlanWeekCommand {
+  readonly subscriptionId: SubscriptionId;
+  readonly billingDate: string;
+}
+
+export interface WeekPlannerWeek {
+  readonly billingDate: CalendarDate;
+  readonly amountCents: number;
+  readonly skipped: boolean;
+  /** False once the week has been billed or otherwise resolved. */
+  readonly togglable: boolean;
+}
+
+export interface WeekPlannerProjection {
+  readonly subscriptionId: SubscriptionId;
+  readonly name: string;
+  readonly weekday: string;
+  readonly perWeekAmountCents: number;
+  readonly weeks: readonly WeekPlannerWeek[];
+  readonly next30DaysDeliveries: number;
+  readonly next30DaysCents: number;
+}
+
+/** How many projected weeks the Week Planner offers at a time. */
+const weekPlannerHorizon = 8;
+
+export type HistoryCategoryFilter = CategoryId | 'uncategorized' | null;
+
+export interface HistoryQuery {
+  readonly from?: string | null;
+  readonly to?: string | null;
+  readonly subscriptionId?: SubscriptionId | null;
+  readonly categoryId?: HistoryCategoryFilter;
+  readonly search?: string;
+}
+
+type HistoryActivityBase = {
+  readonly id: string;
+  readonly subscriptionId: SubscriptionId;
+  readonly subscriptionName: string;
+  readonly categoryId: CategoryId | null;
+  readonly categoryName: string;
+  readonly activityDate: CalendarDate;
+  readonly recordedAt: string;
+};
+
+export type HistoryActivityItem =
+  | (HistoryActivityBase & {
+      readonly kind: 'payment';
+      readonly billingDate: CalendarDate;
+      readonly amountCents: number;
+      readonly paymentMethodName: string | null;
+      readonly note: string | null;
+    })
+  | (HistoryActivityBase & {
+      readonly kind: 'noCharge';
+      readonly billingDate: CalendarDate;
+      readonly expectedAmountCents: number;
+      readonly reason: string | null;
+      readonly generated: boolean;
+    })
+  | (HistoryActivityBase & {
+      readonly kind: 'paused' | 'resumed' | 'canceled' | 'reactivated';
+      readonly pauseEndDate?: CalendarDate | null;
+      readonly nextBillingDate?: CalendarDate;
+      readonly accessEndDate?: CalendarDate | null;
+    });
+
+export interface HistoryBreakdownMonth {
+  readonly month: string;
+  readonly paymentTotalCents: number;
+  readonly paymentCount: number;
+  readonly noChargeCount: number;
+}
+
+export interface HistorySubscriptionBreakdown {
+  readonly subscriptionId: SubscriptionId;
+  readonly name: string;
+  readonly totalCents: number;
+  readonly paymentCount: number;
+  readonly noChargeCount: number;
+  readonly months: readonly HistoryBreakdownMonth[];
+}
+
+export interface HistoryCategoryBreakdown {
+  readonly categoryId: CategoryId | null;
+  readonly name: string;
+  readonly totalCents: number;
+}
+
+export interface HistoryProjection {
+  readonly recordedSpendCents: number;
+  readonly noChargeCount: number;
+  readonly actionNeededCount: number;
+  readonly activities: readonly HistoryActivityItem[];
+  readonly subscriptionBreakdown: readonly HistorySubscriptionBreakdown[];
+  readonly categoryBreakdown: readonly HistoryCategoryBreakdown[];
+  readonly subscriptionOptions: readonly { readonly id: SubscriptionId; readonly name: string }[];
+  readonly categoryOptions: readonly { readonly id: CategoryId | null; readonly name: string }[];
 }
 
 export interface RecordPaymentCommand {
@@ -272,7 +419,12 @@ export class SubscriptionTracker {
       }
     }
     this.householdId = household.id;
-    await this.reconcileDueOccurrences(localCalendarDate(this.dependencies.now()));
+    const asOf = localCalendarDate(this.dependencies.now());
+    await this.resumeElapsedPauses(asOf);
+    // Elapsed Skipped Weeks claim their Billing Occurrence before the generic reconciliation would
+    // leave it unresolved in Action Needed.
+    await this.resolveElapsedSkippedWeeks(asOf);
+    await this.reconcileDueOccurrences(asOf);
   }
 
   async addStandardSubscription(command: AddStandardSubscriptionCommand): Promise<SaveSubscriptionResult> {
@@ -295,7 +447,9 @@ export class SubscriptionTracker {
       return { status: 'possibleDuplicate', candidate: duplicate };
     }
     const occurrences = this.missingOccurrences(snapshot, subscription, asOf);
-    await this.dependencies.repository.saveSubscriptionWithOccurrences(subscription, occurrences);
+    await this.dependencies.repository.saveSubscriptionWithOccurrences(subscription, occurrences, {
+      created: this.plannedSkippedWeeks(subscription, command.initialSkippedDates, asOf),
+    });
     return { status: 'saved', subscriptionId: subscription.id };
   }
 
@@ -305,10 +459,11 @@ export class SubscriptionTracker {
     const current = snapshot.subscriptions.find((item) => item.id === command.subscriptionId);
     if (!current) throw new Error('Subscription not found.');
     const elapsedOccurrences = this.missingOccurrences(snapshot, current, asOf);
+    const startDate = calendarDate(command.scheduleStartDate);
     const schedule = {
       cycle: command.cycle,
-      startDate: calendarDate(command.scheduleStartDate),
-      anchorDay: command.anchorDay ?? calendarParts(calendarDate(command.scheduleStartDate)).day,
+      startDate,
+      anchorDay: anchorDayFor(command.cycle, startDate, command.anchorDay),
     };
     const scheduleChanged =
       schedule.cycle !== current.schedule.cycle ||
@@ -329,6 +484,9 @@ export class SubscriptionTracker {
         pricing: { kind: 'standard', standardAmount: cents(command.amountCents) },
         reminderLeadDaysOverride: command.reminderLeadDaysOverride ?? null,
         notificationsMuted: command.notificationsMuted ?? false,
+        showSkippedWeeks:
+          command.showSkippedWeeks ??
+          (current.schedule.cycle === 'weekly' ? current.showSkippedWeeks : undefined),
       },
       this.dependencies.now().toISOString(),
     );
@@ -342,7 +500,11 @@ export class SubscriptionTracker {
     if (duplicate && !command.savePossibleDuplicate) {
       return { status: 'possibleDuplicate', candidate: duplicate };
     }
-    await this.dependencies.repository.saveSubscriptionWithOccurrences(subscription, elapsedOccurrences);
+    await this.dependencies.repository.saveSubscriptionWithOccurrences(
+      subscription,
+      elapsedOccurrences,
+      { deletedIds: prunedSkipIds(snapshot.skippedWeeks, subscription, asOf) },
+    );
     return { status: 'saved', subscriptionId: subscription.id };
   }
 
@@ -456,11 +618,22 @@ export class SubscriptionTracker {
       reminderLeadDaysOverride: subscription.reminderLeadDaysOverride,
       householdReminderLeadDays: snapshot.household.defaultReminderLeadDays,
       notificationsMuted: subscription.notificationsMuted,
+      showSkippedWeeks: subscription.showSkippedWeeks,
       archived: subscription.archivedAt !== null,
-      nextBillingDate: nextBillingDateFor(subscription, localCalendarDate(this.dependencies.now())),
+      nextBillingDate: nextBillingDateFor(
+        subscription,
+        localCalendarDate(this.dependencies.now()),
+        snapshot.skippedWeeks,
+      ),
       createdAt: subscription.createdAt,
       updatedAt: subscription.updatedAt,
     };
+  }
+
+  async deleteSubscription(subscriptionId: SubscriptionId): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    requireSubscription(snapshot, subscriptionId);
+    await this.dependencies.repository.deleteSubscription(subscriptionId);
   }
 
   async loadBillingOccurrenceDetail(
@@ -493,7 +666,11 @@ export class SubscriptionTracker {
           note: payment.note,
         }
       : exception
-        ? { kind: 'noCharge', reason: exception.reason }
+        ? {
+            kind: 'noCharge',
+            reason: exception.reason,
+            generatedBySkippedWeekId: exception.generatedBySkippedWeekId,
+          }
         : { kind: 'unresolved' };
     return {
       billingOccurrenceId: occurrence?.id ?? null,
@@ -550,6 +727,13 @@ export class SubscriptionTracker {
       asOf,
       now: now.toISOString(),
     });
+    const event = createCancellationEvent({
+      id: entityId<'LifecycleEvent'>(this.dependencies.createId()) as LifecycleEventId,
+      subscriptionId: current.id,
+      effectiveDate: command.confirmationDate,
+      accessEndDate: command.accessEndDate,
+      now: now.toISOString(),
+    });
     const exceptions = unresolvedCancellationOccurrences(
       snapshot,
       current.id,
@@ -560,10 +744,11 @@ export class SubscriptionTracker {
         id: entityId<'ChargeException'>(this.dependencies.createId()) as ChargeExceptionId,
         billingOccurrenceId: occurrence.id,
         reason: 'Subscription canceled before charge',
+        generatedByLifecycleEventId: event.id,
         now: now.toISOString(),
       }),
     );
-    await this.dependencies.repository.saveSubscriptionCancellation(subscription, exceptions);
+    await this.dependencies.repository.saveLifecycleChange(subscription, event, exceptions);
   }
 
   async editCancellationDetails(command: EditCancellationDetailsCommand): Promise<void> {
@@ -576,7 +761,42 @@ export class SubscriptionTracker {
       asOf: localCalendarDate(now),
       now: now.toISOString(),
     });
-    await this.dependencies.repository.saveSubscription(subscription);
+    const existingEvent = latestLifecycleEvent(snapshot.lifecycleEvents, current.id, 'canceled');
+    const event = existingEvent
+      ? {
+          ...existingEvent,
+          effectiveDate: calendarDate(command.confirmationDate),
+          accessEndDate: command.accessEndDate ? calendarDate(command.accessEndDate) : null,
+          updatedAt: utcTimestamp(now.toISOString()),
+        }
+      : createCancellationEvent({
+          id: entityId<'LifecycleEvent'>(this.dependencies.createId()) as LifecycleEventId,
+          subscriptionId: current.id,
+          effectiveDate: command.confirmationDate,
+          accessEndDate: command.accessEndDate,
+          now: now.toISOString(),
+        });
+    const previousGenerated = new Map(
+      snapshot.chargeExceptions
+        .filter((exception) => exception.generatedByLifecycleEventId === event.id)
+        .map((exception) => [exception.billingOccurrenceId, exception]),
+    );
+    const exceptions = unresolvedCancellationOccurrences(
+      snapshot,
+      current.id,
+      calendarDate(command.confirmationDate),
+      localCalendarDate(now),
+      event.id,
+    ).map((occurrence) =>
+      previousGenerated.get(occurrence.id) ?? createChargeException({
+        id: entityId<'ChargeException'>(this.dependencies.createId()) as ChargeExceptionId,
+        billingOccurrenceId: occurrence.id,
+        reason: 'Subscription canceled before charge',
+        generatedByLifecycleEventId: event.id,
+        now: now.toISOString(),
+      }),
+    );
+    await this.dependencies.repository.saveLifecycleChange(subscription, event, exceptions);
   }
 
   async reactivateSubscription(command: ReactivateSubscriptionCommand): Promise<void> {
@@ -588,7 +808,179 @@ export class SubscriptionTracker {
       asOf: localCalendarDate(now),
       now: now.toISOString(),
     });
-    await this.dependencies.repository.saveSubscription(subscription);
+    const event = createReactivationEvent({
+      id: entityId<'LifecycleEvent'>(this.dependencies.createId()) as LifecycleEventId,
+      subscriptionId: current.id,
+      effectiveDate: localCalendarDate(now),
+      nextBillingDate: command.nextBillingDate,
+      pricing: subscription.pricing,
+      now: now.toISOString(),
+    });
+    await this.dependencies.repository.saveLifecycleChange(subscription, event, [], {
+      deletedIds: prunedSkipIds(snapshot.skippedWeeks, subscription, localCalendarDate(now)),
+    });
+  }
+
+  async pauseSubscription(command: PauseSubscriptionCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const current = requireSubscription(snapshot, command.subscriptionId);
+    const now = this.dependencies.now();
+    const subscription = markSubscriptionPaused(current, {
+      effectiveDate: command.effectiveDate,
+      pauseEndDate: command.pauseEndDate,
+      asOf: localCalendarDate(now),
+      now: now.toISOString(),
+    });
+    const event = createPauseEvent({
+      id: entityId<'LifecycleEvent'>(this.dependencies.createId()) as LifecycleEventId,
+      subscriptionId: current.id,
+      effectiveDate: command.effectiveDate,
+      pauseEndDate: command.pauseEndDate,
+      now: now.toISOString(),
+    });
+    await this.dependencies.repository.saveLifecycleChange(subscription, event);
+  }
+
+  async resumeSubscription(command: ResumeSubscriptionCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const current = requireSubscription(snapshot, command.subscriptionId);
+    const now = this.dependencies.now();
+    const asOf = localCalendarDate(now);
+    if (compareCalendarDates(calendarDate(command.nextBillingDate), asOf) <= 0) {
+      throw new DomainValidationError('Next Billing Date must be after today.');
+    }
+    const subscription = returnPausedSubscriptionToActive(current, {
+      effectiveDate: asOf,
+      nextBillingDate: command.nextBillingDate,
+      asOf,
+      now: now.toISOString(),
+    });
+    const event = createResumeEvent({
+      id: entityId<'LifecycleEvent'>(this.dependencies.createId()) as LifecycleEventId,
+      subscriptionId: current.id,
+      effectiveDate: asOf,
+      nextBillingDate: command.nextBillingDate,
+      now: now.toISOString(),
+    });
+    await this.dependencies.repository.saveLifecycleChange(subscription, event, [], {
+      deletedIds: prunedSkipIds(snapshot.skippedWeeks, subscription, asOf),
+    });
+  }
+
+  async skipWeek(command: PlanWeekCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const subscription = requireSubscription(snapshot, command.subscriptionId);
+    const billingDate = calendarDate(command.billingDate);
+    const skippedWeek = createSkippedWeek({
+      id: entityId<'SkippedWeek'>(this.dependencies.createId()) as SkippedWeekId,
+      subscription,
+      billingDate: command.billingDate,
+      existingSkips: snapshot.skippedWeeks,
+      asOf: localCalendarDate(this.dependencies.now()),
+      occurrenceMaterialized: Boolean(findOccurrence(snapshot, subscription.id, billingDate)),
+      now: this.dependencies.now().toISOString(),
+    });
+    await this.dependencies.repository.saveSkippedWeek(skippedWeek);
+  }
+
+  async unskipWeek(command: PlanWeekCommand): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const billingDate = calendarDate(command.billingDate);
+    const skippedWeek = snapshot.skippedWeeks.find(
+      (skip) => skip.subscriptionId === command.subscriptionId && skip.billingDate === billingDate,
+    );
+    if (!skippedWeek) throw new DomainValidationError('This week is not skipped.');
+    assertSkipRemovable(skippedWeek, skipResolution(snapshot, skippedWeek));
+    await this.dependencies.repository.deleteSkippedWeek(skippedWeek.id);
+  }
+
+  /** Reconciles a Skipped Week whose Billing Date has already passed and was charged anyway. */
+  async removeMaterializedSkip(command: { readonly skippedWeekId: SkippedWeekId }): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const skippedWeek = snapshot.skippedWeeks.find((skip) => skip.id === command.skippedWeekId);
+    if (!skippedWeek) throw new DomainValidationError('Skipped Week not found.');
+    assertSkipRemovable(skippedWeek, skipResolution(snapshot, skippedWeek));
+    await this.dependencies.repository.deleteSkippedWeek(skippedWeek.id);
+  }
+
+  async loadWeekPlanner(
+    subscriptionId: SubscriptionId,
+    asOf = localCalendarDate(this.dependencies.now()),
+  ): Promise<WeekPlannerProjection> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const subscription = requireSubscription(snapshot, subscriptionId);
+    if (subscription.schedule.cycle !== 'weekly') {
+      throw new DomainValidationError('Only a Weekly Subscription has a Week Planner.');
+    }
+    if (subscription.archivedAt || subscription.lifecycle.status !== 'active') {
+      throw new DomainValidationError('The Week Planner is available for Active Subscriptions only.');
+    }
+    const resolvedOccurrenceIds = resolvedOccurrenceIdSet(snapshot);
+    const weeks: WeekPlannerWeek[] = [];
+    let billingDate = nextOccurrenceOnOrAfter(subscription.schedule, asOf);
+    for (let index = 0; index < weekPlannerHorizon; index += 1) {
+      const occurrence = findOccurrence(snapshot, subscriptionId, billingDate);
+      weeks.push({
+        billingDate,
+        amountCents: occurrence?.expectedAmount ?? amountForOccurrence(subscription.pricing, billingDate),
+        skipped: isDateSkipped(snapshot.skippedWeeks, subscriptionId, billingDate),
+        togglable: !occurrence || !resolvedOccurrenceIds.has(occurrence.id),
+      });
+      billingDate = addCalendarDays(billingDate, 7);
+    }
+    const windowEnd = addCalendarDays(asOf, 29);
+    const deliveries = weeks.filter(
+      (week) => !week.skipped && compareCalendarDates(week.billingDate, windowEnd) <= 0,
+    );
+    return {
+      subscriptionId,
+      name: subscription.name,
+      weekday: calendarWeekdayName(subscription.schedule.startDate),
+      perWeekAmountCents: amountForOccurrence(subscription.pricing, weeks[0].billingDate),
+      weeks,
+      next30DaysDeliveries: deliveries.length,
+      next30DaysCents: deliveries.reduce((total, week) => total + week.amountCents, 0),
+    };
+  }
+
+  async deleteLifecycleEvent(eventId: LifecycleEventId): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const event = snapshot.lifecycleEvents.find((item) => item.id === eventId);
+    if (!event) throw new DomainValidationError('Lifecycle Event not found.');
+    const current = requireSubscription(snapshot, event.subscriptionId);
+    const remaining = snapshot.lifecycleEvents
+      .filter((item) => item.subscriptionId === current.id && item.id !== eventId)
+      .sort((left, right) =>
+        right.effectiveDate.localeCompare(left.effectiveDate)
+        || right.createdAt.localeCompare(left.createdAt),
+      );
+    const latest = remaining[0];
+    if (current.archivedAt && (!latest || latest.kind !== 'canceled')) {
+      throw new DomainValidationError('Restore this Archived Subscription before deleting its current Cancellation event.');
+    }
+    let lifecycle: SubscriptionLifecycle = { status: 'active' };
+    let schedule = current.schedule;
+    if (latest?.kind === 'paused') {
+      lifecycle = { status: 'paused', pauseEndDate: latest.pauseEndDate };
+    } else if (latest?.kind === 'canceled') {
+      lifecycle = {
+        status: 'canceled',
+        cancellationConfirmationDate: latest.effectiveDate,
+        accessEndDate: latest.accessEndDate,
+      };
+    } else if (latest?.kind === 'resumed' || latest?.kind === 'reactivated') {
+      schedule = {
+        ...schedule,
+        startDate: latest.nextBillingDate,
+        anchorDay: calendarParts(latest.nextBillingDate).day,
+      };
+    }
+    await this.dependencies.repository.deleteLifecycleEvent(eventId, {
+      ...current,
+      lifecycle,
+      schedule,
+      updatedAt: utcTimestamp(this.dependencies.now().toISOString()),
+    });
   }
 
   async recordPayment(command: RecordPaymentCommand): Promise<void> {
@@ -630,6 +1022,159 @@ export class SubscriptionTracker {
     await this.dependencies.repository.saveOccurrenceResolution(occurrence, exception);
   }
 
+  async loadHistory(
+    query: HistoryQuery = {},
+    asOf = localCalendarDate(this.dependencies.now()),
+  ): Promise<HistoryProjection> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const from = query.from ? calendarDate(query.from) : null;
+    const requestedTo = query.to ? calendarDate(query.to) : asOf;
+    const to = compareCalendarDates(requestedTo, asOf) > 0 ? asOf : requestedTo;
+    if (from && compareCalendarDates(from, to) > 0) {
+      throw new DomainValidationError('History start date must be on or before its end date.');
+    }
+    const subscriptionsById = new Map(snapshot.subscriptions.map((item) => [item.id, item]));
+    const occurrencesById = new Map(snapshot.billingOccurrences.map((item) => [item.id, item]));
+    const paymentMethodsById = new Map(snapshot.paymentMethods.map((item) => [item.id, item]));
+    const matchesSubscription = (subscription: Subscription): boolean => {
+      if (query.subscriptionId && subscription.id !== query.subscriptionId) return false;
+      if (query.categoryId === 'uncategorized' && subscription.categoryId !== null) return false;
+      if (query.categoryId && query.categoryId !== 'uncategorized' && subscription.categoryId !== query.categoryId) {
+        return false;
+      }
+      const search = query.search?.trim().toLocaleLowerCase();
+      return !search || subscription.name.toLocaleLowerCase().includes(search);
+    };
+    const inRange = (date: CalendarDate): boolean =>
+      (!from || compareCalendarDates(date, from) >= 0) && compareCalendarDates(date, to) <= 0;
+    const base = (subscription: Subscription, id: string, activityDate: CalendarDate, recordedAt: string) => ({
+      id,
+      subscriptionId: subscription.id,
+      subscriptionName: subscription.name,
+      categoryId: subscription.categoryId,
+      categoryName: categoryName(snapshot, subscription.categoryId) ?? 'Uncategorized',
+      activityDate,
+      recordedAt,
+    });
+
+    const paymentActivities = snapshot.payments.flatMap((payment): HistoryActivityItem[] => {
+      const occurrence = occurrencesById.get(payment.billingOccurrenceId);
+      const subscription = occurrence ? subscriptionsById.get(occurrence.subscriptionId) : null;
+      if (!occurrence || !subscription || !matchesSubscription(subscription) || !inRange(payment.paymentDate)) return [];
+      return [{
+        ...base(subscription, payment.id, payment.paymentDate, payment.createdAt),
+        kind: 'payment',
+        billingDate: occurrence.billingDate,
+        amountCents: payment.amount,
+        paymentMethodName: payment.paymentMethodId
+          ? paymentMethodsById.get(payment.paymentMethodId)?.name ?? null
+          : null,
+        note: payment.note,
+      }];
+    });
+    const exceptionActivities = snapshot.chargeExceptions.flatMap((exception): HistoryActivityItem[] => {
+      const occurrence = occurrencesById.get(exception.billingOccurrenceId);
+      const subscription = occurrence ? subscriptionsById.get(occurrence.subscriptionId) : null;
+      if (!occurrence || !subscription || !matchesSubscription(subscription) || !inRange(occurrence.billingDate)) return [];
+      return [{
+        ...base(subscription, exception.id, occurrence.billingDate, exception.createdAt),
+        kind: 'noCharge',
+        billingDate: occurrence.billingDate,
+        expectedAmountCents: occurrence.expectedAmount,
+        reason: exception.reason,
+        generated: exception.generatedByLifecycleEventId !== null,
+      }];
+    });
+    const lifecycleActivities = snapshot.lifecycleEvents.flatMap((event): HistoryActivityItem[] => {
+      const subscription = subscriptionsById.get(event.subscriptionId);
+      if (!subscription || !matchesSubscription(subscription) || !inRange(event.effectiveDate)) return [];
+      const common = base(subscription, event.id, event.effectiveDate, event.createdAt);
+      switch (event.kind) {
+        case 'paused':
+          return [{ ...common, kind: 'paused', pauseEndDate: event.pauseEndDate }];
+        case 'resumed':
+          return [{ ...common, kind: 'resumed', nextBillingDate: event.nextBillingDate }];
+        case 'canceled':
+          return [{ ...common, kind: 'canceled', accessEndDate: event.accessEndDate }];
+        case 'reactivated':
+          return [{ ...common, kind: 'reactivated', nextBillingDate: event.nextBillingDate }];
+      }
+    });
+    const activities = [...paymentActivities, ...exceptionActivities, ...lifecycleActivities]
+      .sort(compareHistoryActivity);
+
+    const includedPayments = paymentActivities.filter(
+      (item): item is Extract<HistoryActivityItem, { kind: 'payment' }> => item.kind === 'payment',
+    );
+    const includedExceptions = exceptionActivities.filter(
+      (item): item is Extract<HistoryActivityItem, { kind: 'noCharge' }> => item.kind === 'noCharge',
+    );
+    const subscriptionBreakdown = snapshot.subscriptions
+      .filter(matchesSubscription)
+      .map((subscription): HistorySubscriptionBreakdown => {
+        const payments = includedPayments.filter((item) => item.subscriptionId === subscription.id);
+        const exceptions = includedExceptions.filter((item) => item.subscriptionId === subscription.id);
+        const monthKeys = new Set([
+          ...payments.map((item) => item.activityDate.slice(0, 7)),
+          ...exceptions.map((item) => item.activityDate.slice(0, 7)),
+        ]);
+        return {
+          subscriptionId: subscription.id,
+          name: subscription.name,
+          totalCents: payments.reduce((total, item) => total + item.amountCents, 0),
+          paymentCount: payments.length,
+          noChargeCount: exceptions.length,
+          months: [...monthKeys].sort().reverse().map((month) => {
+            const monthPayments = payments.filter((item) => item.activityDate.startsWith(month));
+            return {
+              month,
+              paymentTotalCents: monthPayments.reduce((total, item) => total + item.amountCents, 0),
+              paymentCount: monthPayments.length,
+              noChargeCount: exceptions.filter((item) => item.activityDate.startsWith(month)).length,
+            };
+          }),
+        };
+      })
+      .filter((item) => item.paymentCount > 0 || item.noChargeCount > 0)
+      .sort((left, right) => right.totalCents - left.totalCents || left.name.localeCompare(right.name));
+    const categoryTotals = new Map<string, HistoryCategoryBreakdown>();
+    for (const payment of includedPayments) {
+      const key = payment.categoryId ?? 'uncategorized';
+      const current = categoryTotals.get(key);
+      categoryTotals.set(key, {
+        categoryId: payment.categoryId,
+        name: payment.categoryName,
+        totalCents: (current?.totalCents ?? 0) + payment.amountCents,
+      });
+    }
+    const resolvedOccurrenceIds = new Set([
+      ...snapshot.payments.map((item) => item.billingOccurrenceId),
+      ...snapshot.chargeExceptions.map((item) => item.billingOccurrenceId),
+    ]);
+    const actionNeededCount = snapshot.billingOccurrences.filter((occurrence) => {
+      const subscription = subscriptionsById.get(occurrence.subscriptionId);
+      return subscription && matchesSubscription(subscription)
+        && compareCalendarDates(occurrence.billingDate, asOf) < 0
+        && !resolvedOccurrenceIds.has(occurrence.id);
+    }).length;
+    return {
+      recordedSpendCents: includedPayments.reduce((total, item) => total + item.amountCents, 0),
+      noChargeCount: includedExceptions.length,
+      actionNeededCount,
+      activities,
+      subscriptionBreakdown,
+      categoryBreakdown: [...categoryTotals.values()]
+        .sort((left, right) => right.totalCents - left.totalCents || left.name.localeCompare(right.name)),
+      subscriptionOptions: snapshot.subscriptions
+        .map(({ id, name }) => ({ id, name }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+      categoryOptions: [
+        ...snapshot.categories.map(({ id, name }) => ({ id: id as CategoryId | null, name })),
+        { id: null, name: 'Uncategorized' },
+      ].sort((left, right) => left.name.localeCompare(right.name)),
+    };
+  }
+
   async loadDashboard(asOf = localCalendarDate(this.dependencies.now())): Promise<DashboardProjection> {
     const snapshot = await this.dependencies.repository.loadSnapshot();
     const visibleSubscriptions = snapshot.subscriptions.filter(
@@ -643,10 +1188,7 @@ export class SubscriptionTracker {
     const subscriptionsById = new Map(
       visibleSubscriptions.map((subscription) => [subscription.id, subscription]),
     );
-    const resolvedOccurrenceIds = new Set([
-      ...snapshot.payments.map((payment) => payment.billingOccurrenceId),
-      ...snapshot.chargeExceptions.map((exception) => exception.billingOccurrenceId),
-    ]);
+    const resolvedOccurrenceIds = resolvedOccurrenceIdSet(snapshot);
     const actionNeeded = snapshot.billingOccurrences
       .filter(
         (occurrence) =>
@@ -663,19 +1205,41 @@ export class SubscriptionTracker {
           billingDate: occurrence.billingDate,
           amountCents: occurrence.expectedAmount,
           category: categoryName(snapshot, subscription.categoryId),
+          cycle: subscription.schedule.cycle,
+          skipped: false,
         };
       });
     const next7DaysEnd = addCalendarDays(asOf, 6);
     const rollingWindowEnd = addCalendarDays(asOf, 29);
+    const windowDates = new Map(
+      activeSubscriptions.map((subscription) => [
+        subscription.id,
+        occurrencesInRange(subscription.schedule, asOf, rollingWindowEnd),
+      ]),
+    );
     const chargesInWindow = activeSubscriptions.flatMap((subscription) =>
-      occurrencesInRange(subscription.schedule, asOf, rollingWindowEnd)
+      windowDates
+        .get(subscription.id)!
+        .filter((billingDate) => !isDateSkipped(snapshot.skippedWeeks, subscription.id, billingDate))
         .map((billingDate) => upcomingChargeFor(snapshot, subscription, billingDate))
         .filter((charge) => !chargeIsResolved(charge, resolvedOccurrenceIds)),
     );
-    const next7Days = chargesInWindow.filter(
+    // Ghost rows sit in the same date groups but never contribute to a total (D6).
+    const ghostCharges = activeSubscriptions.flatMap((subscription) =>
+      subscription.showSkippedWeeks
+        ? windowDates
+            .get(subscription.id)!
+            .filter((billingDate) =>
+              isDateSkipped(snapshot.skippedWeeks, subscription.id, billingDate),
+            )
+            .map((billingDate) => upcomingChargeFor(snapshot, subscription, billingDate, true))
+        : [],
+    );
+    const datedCharges = [...chargesInWindow, ...ghostCharges];
+    const next7Days = datedCharges.filter(
       (charge) => compareCalendarDates(charge.billingDate, next7DaysEnd) <= 0,
     );
-    const laterThisMonth = chargesInWindow.filter(
+    const laterThisMonth = datedCharges.filter(
       (charge) => compareCalendarDates(charge.billingDate, next7DaysEnd) > 0,
     );
     const subscriptionsInWindow = new Set(
@@ -709,7 +1273,7 @@ export class SubscriptionTracker {
     const monthlyCommitmentCents = activeSubscriptions.reduce((total, subscription) => {
       const next = nextOccurrenceOnOrAfter(subscription.schedule, asOf);
       const amount = amountForOccurrence(subscription.pricing, next);
-      return total + (subscription.schedule.cycle === 'yearly' ? Math.round(amount / 12) : amount);
+      return total + normalizedMonthlyAmount(subscription.schedule.cycle, amount);
     }, 0);
     return { monthlyCommitmentCents, dueNext30DaysCents, upcomingChargeGroups };
   }
@@ -720,12 +1284,7 @@ export class SubscriptionTracker {
     const snapshot = await this.dependencies.repository.loadSnapshot();
     return snapshot.subscriptions
       .map((subscription): SubscriptionListItem => {
-        const nextBillingDate =
-          subscription.lifecycle.status === 'active'
-            ? nextOccurrenceOnOrAfter(subscription.schedule, asOf)
-            : subscription.lifecycle.status === 'paused'
-              ? subscription.lifecycle.pauseEndDate
-              : null;
+        const nextBillingDate = nextBillingDateFor(subscription, asOf, snapshot.skippedWeeks);
         const amountDate = nextBillingDate ?? asOf;
         return {
           id: subscription.id,
@@ -779,10 +1338,14 @@ export class SubscriptionTracker {
         return [];
       }
       const leadDays = subscription.reminderLeadDaysOverride ?? snapshot.household.defaultReminderLeadDays;
-      let billingDate = nextOccurrenceOnOrAfter(subscription.schedule, asOf);
+      let billingDate = nextUnskippedOccurrence(subscription, asOf, snapshot.skippedWeeks);
       let triggerDate = localReminderDate(billingDate, leadDays, snapshot.household.reminderTime);
       if (triggerDate <= now) {
-        billingDate = nextOccurrenceOnOrAfter(subscription.schedule, addCalendarDays(billingDate, 1));
+        billingDate = nextUnskippedOccurrence(
+          subscription,
+          addCalendarDays(billingDate, 1),
+          snapshot.skippedWeeks,
+        );
         triggerDate = localReminderDate(billingDate, leadDays, snapshot.household.reminderTime);
       }
       return [{
@@ -792,6 +1355,73 @@ export class SubscriptionTracker {
         triggerDate,
       }];
     });
+  }
+
+  private async resumeElapsedPauses(asOf: CalendarDate): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    for (const current of snapshot.subscriptions) {
+      if (
+        current.lifecycle.status !== 'paused' ||
+        !current.lifecycle.pauseEndDate ||
+        compareCalendarDates(current.lifecycle.pauseEndDate, asOf) > 0
+      ) {
+        continue;
+      }
+      const now = this.dependencies.now();
+      const effectiveDate = current.lifecycle.pauseEndDate;
+      const subscription = returnPausedSubscriptionToActive(current, {
+        effectiveDate,
+        nextBillingDate: effectiveDate,
+        asOf,
+        now: now.toISOString(),
+      });
+      const event = createResumeEvent({
+        id: entityId<'LifecycleEvent'>(this.dependencies.createId()) as LifecycleEventId,
+        subscriptionId: current.id,
+        effectiveDate,
+        nextBillingDate: effectiveDate,
+        now: now.toISOString(),
+      });
+      await this.dependencies.repository.saveLifecycleChange(subscription, event);
+    }
+  }
+
+  /**
+   * Materializes each elapsed Skipped Week as a Billing Occurrence resolved by its own Generated
+   * Charge Exception, so a planned skip never surfaces as Action Needed (ADR-0006).
+   */
+  private async resolveElapsedSkippedWeeks(asOf: CalendarDate): Promise<void> {
+    const snapshot = await this.dependencies.repository.loadSnapshot();
+    const resolvedOccurrenceIds = resolvedOccurrenceIdSet(snapshot);
+    for (const skippedWeek of snapshot.skippedWeeks) {
+      if (compareCalendarDates(skippedWeek.billingDate, asOf) >= 0) continue;
+      const subscription = snapshot.subscriptions.find(
+        (item) => item.id === skippedWeek.subscriptionId,
+      );
+      // Paused, canceled, and archived Subscriptions project nothing, so their skips stay inert.
+      if (!subscription || subscription.archivedAt || subscription.lifecycle.status !== 'active') {
+        continue;
+      }
+      if (!isProjectedOccurrence(subscription, skippedWeek.billingDate)) continue;
+      const existing = findOccurrence(snapshot, subscription.id, skippedWeek.billingDate);
+      if (existing && resolvedOccurrenceIds.has(existing.id)) continue;
+      const now = this.dependencies.now().toISOString();
+      const occurrence: BillingOccurrence = existing ?? {
+        id: entityId<'BillingOccurrence'>(this.dependencies.createId()) as BillingOccurrenceId,
+        subscriptionId: subscription.id,
+        billingDate: skippedWeek.billingDate,
+        expectedAmount: amountForOccurrence(subscription.pricing, skippedWeek.billingDate),
+        createdAt: utcTimestamp(now),
+      };
+      const exception = createChargeException({
+        id: entityId<'ChargeException'>(this.dependencies.createId()) as ChargeExceptionId,
+        billingOccurrenceId: occurrence.id,
+        reason: 'Skipped week',
+        generatedBySkippedWeekId: skippedWeek.id,
+        now,
+      });
+      await this.dependencies.repository.saveOccurrenceResolution(occurrence, exception);
+    }
   }
 
   private async reconcileDueOccurrences(asOf: CalendarDate): Promise<void> {
@@ -872,6 +1502,29 @@ export class SubscriptionTracker {
         expectedAmount: amountForOccurrence(subscription.pricing, billingDate),
         createdAt,
       }));
+  }
+
+  /** Validates the weekly creation form's pre-planned Skipped Weeks against the saved schedule. */
+  private plannedSkippedWeeks(
+    subscription: Subscription,
+    billingDates: readonly string[] | undefined,
+    asOf: CalendarDate,
+  ): readonly SkippedWeek[] {
+    if (!billingDates?.length || subscription.schedule.cycle !== 'weekly') return [];
+    const now = this.dependencies.now().toISOString();
+    return billingDates.reduce<SkippedWeek[]>((created, billingDate) => {
+      created.push(
+        createSkippedWeek({
+          id: entityId<'SkippedWeek'>(this.dependencies.createId()) as SkippedWeekId,
+          subscription,
+          billingDate,
+          existingSkips: created,
+          asOf,
+          now,
+        }),
+      );
+      return created;
+    }, []);
   }
 
   private createDefaultHousehold(): HouseholdList {
@@ -1018,11 +1671,15 @@ function findPossibleDuplicate(
   return null;
 }
 
-function nextBillingDateFor(subscription: Subscription, asOf: CalendarDate): CalendarDate | null {
+function nextBillingDateFor(
+  subscription: Subscription,
+  asOf: CalendarDate,
+  skippedWeeks: readonly SkippedWeek[] = [],
+): CalendarDate | null {
   if (
     subscription.lifecycle.status === 'active'
   ) {
-    return nextOccurrenceOnOrAfter(subscription.schedule, asOf);
+    return nextUnskippedOccurrence(subscription, asOf, skippedWeeks);
   }
   return subscription.lifecycle.status === 'paused' ? subscription.lifecycle.pauseEndDate : null;
 }
@@ -1039,6 +1696,7 @@ function upcomingChargeFor(
   snapshot: Awaited<ReturnType<HouseholdRepository['loadSnapshot']>>,
   subscription: Subscription,
   billingDate: CalendarDate,
+  skipped = false,
 ): UpcomingCharge {
   const occurrence = snapshot.billingOccurrences.find(
     (item) => item.subscriptionId === subscription.id && item.billingDate === billingDate,
@@ -1050,7 +1708,58 @@ function upcomingChargeFor(
     billingDate,
     amountCents: occurrence?.expectedAmount ?? amountForOccurrence(subscription.pricing, billingDate),
     category: categoryName(snapshot, subscription.categoryId),
+    cycle: subscription.schedule.cycle,
+    skipped,
   };
+}
+
+function resolvedOccurrenceIdSet(snapshot: Snapshot): ReadonlySet<BillingOccurrenceId> {
+  return new Set([
+    ...snapshot.payments.map((payment) => payment.billingOccurrenceId),
+    ...snapshot.chargeExceptions.map((exception) => exception.billingOccurrenceId),
+  ]);
+}
+
+function skipResolution(snapshot: Snapshot, skippedWeek: SkippedWeek): SkipResolution {
+  const occurrence = findOccurrence(snapshot, skippedWeek.subscriptionId, skippedWeek.billingDate);
+  if (!occurrence) return { kind: 'unresolved' };
+  if (snapshot.payments.some((payment) => payment.billingOccurrenceId === occurrence.id)) {
+    return { kind: 'payment' };
+  }
+  const exception = snapshot.chargeExceptions.find(
+    (item) => item.billingOccurrenceId === occurrence.id,
+  );
+  return exception
+    ? { kind: 'exception', generatedBySkippedWeekId: exception.generatedBySkippedWeekId }
+    : { kind: 'unresolved' };
+}
+
+/** Future Skipped Weeks that a new schedule no longer projects, including a move off Weekly. */
+function prunedSkipIds(
+  skippedWeeks: readonly SkippedWeek[],
+  subscription: Subscription,
+  asOf: CalendarDate,
+): readonly SkippedWeekId[] {
+  return staleFutureSkips(skippedWeeks, subscription, asOf).map((skip) => skip.id);
+}
+
+/** A weekly amount contributes 52/12 of its value; planned Skipped Weeks do not reduce it (D2). */
+function normalizedMonthlyAmount(cycle: BillingCycle, amountCents: number): number {
+  if (cycle === 'yearly') return Math.round(amountCents / 12);
+  if (cycle === 'weekly') return Math.round((amountCents * 52) / 12);
+  return amountCents;
+}
+
+function nextUnskippedOccurrence(
+  subscription: Subscription,
+  from: CalendarDate,
+  skippedWeeks: readonly SkippedWeek[],
+): CalendarDate {
+  let billingDate = nextOccurrenceOnOrAfter(subscription.schedule, from);
+  while (isDateSkipped(skippedWeeks, subscription.id, billingDate)) {
+    billingDate = nextOccurrenceOnOrAfter(subscription.schedule, addCalendarDays(billingDate, 1));
+  }
+  return billingDate;
 }
 
 function findOccurrence(
@@ -1100,11 +1809,15 @@ function nextUnresolvedBillingDate(
   asOf: CalendarDate,
   resolvedOccurrenceIds: ReadonlySet<BillingOccurrenceId>,
 ): CalendarDate {
-  let billingDate = nextOccurrenceOnOrAfter(subscription.schedule, asOf);
+  let billingDate = nextUnskippedOccurrence(subscription, asOf, snapshot.skippedWeeks);
   while (true) {
     const occurrence = findOccurrence(snapshot, subscription.id, billingDate);
     if (!occurrence || !resolvedOccurrenceIds.has(occurrence.id)) return billingDate;
-    billingDate = nextOccurrenceOnOrAfter(subscription.schedule, addCalendarDays(billingDate, 1));
+    billingDate = nextUnskippedOccurrence(
+      subscription,
+      addCalendarDays(billingDate, 1),
+      snapshot.skippedWeeks,
+    );
   }
 }
 
@@ -1117,23 +1830,6 @@ function compareUpcomingCharges(left: UpcomingCharge, right: UpcomingCharge): nu
 
 export function localCalendarDate(date: Date): CalendarDate {
   return formatCalendarDate(date.getFullYear(), date.getMonth() + 1, date.getDate());
-}
-
-function addCalendarDays(date: CalendarDate, count: number): CalendarDate {
-  let { year, month, day } = calendarParts(date);
-  for (let index = 0; index < count; index += 1) {
-    day += 1;
-    const monthDays = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    if (day > monthDays) {
-      day = 1;
-      month += 1;
-      if (month > 12) {
-        month = 1;
-        year += 1;
-      }
-    }
-  }
-  return formatCalendarDate(year, month, day);
 }
 
 function localReminderDate(billingDate: CalendarDate, leadDays: number, reminderTime: string): Date {
@@ -1162,10 +1858,13 @@ function unresolvedCancellationOccurrences(
   subscriptionId: SubscriptionId,
   confirmationDate: CalendarDate,
   asOf: CalendarDate,
+  replacingEventId?: LifecycleEventId,
 ): readonly BillingOccurrence[] {
   const resolvedIds = new Set([
     ...snapshot.payments.map((payment) => payment.billingOccurrenceId),
-    ...snapshot.chargeExceptions.map((exception) => exception.billingOccurrenceId),
+    ...snapshot.chargeExceptions
+      .filter((exception) => exception.generatedByLifecycleEventId !== replacingEventId)
+      .map((exception) => exception.billingOccurrenceId),
   ]);
   return snapshot.billingOccurrences
     .filter(
@@ -1173,7 +1872,28 @@ function unresolvedCancellationOccurrences(
         occurrence.subscriptionId === subscriptionId &&
         compareCalendarDates(occurrence.billingDate, confirmationDate) >= 0 &&
         compareCalendarDates(occurrence.billingDate, asOf) <= 0 &&
-        !resolvedIds.has(occurrence.id),
+        !resolvedIds.has(occurrence.id) &&
+        // A planned Skipped Week resolves its own date, so cancellation must not claim it too.
+        !isDateSkipped(snapshot.skippedWeeks, subscriptionId, occurrence.billingDate),
     )
     .sort((left, right) => compareCalendarDates(left.billingDate, right.billingDate));
+}
+
+function latestLifecycleEvent(
+  events: readonly LifecycleEvent[],
+  subscriptionId: SubscriptionId,
+  kind: LifecycleEvent['kind'],
+): LifecycleEvent | undefined {
+  return events
+    .filter((event) => event.subscriptionId === subscriptionId && event.kind === kind)
+    .sort((left, right) =>
+      right.effectiveDate.localeCompare(left.effectiveDate)
+      || right.createdAt.localeCompare(left.createdAt),
+    )[0];
+}
+
+function compareHistoryActivity(left: HistoryActivityItem, right: HistoryActivityItem): number {
+  return right.activityDate.localeCompare(left.activityDate)
+    || right.recordedAt.localeCompare(left.recordedAt)
+    || right.id.localeCompare(left.id);
 }

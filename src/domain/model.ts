@@ -5,8 +5,10 @@ export type SubscriptionId = EntityId<'Subscription'>;
 export type BillingOccurrenceId = EntityId<'BillingOccurrence'>;
 export type PaymentId = EntityId<'Payment'>;
 export type ChargeExceptionId = EntityId<'ChargeException'>;
+export type LifecycleEventId = EntityId<'LifecycleEvent'>;
 export type PaymentMethodId = EntityId<'PaymentMethod'>;
 export type CategoryId = EntityId<'Category'>;
+export type SkippedWeekId = EntityId<'SkippedWeek'>;
 
 export const starterCategories = [
   { id: '20000000-0000-4000-8000-000000000001', name: 'Entertainment' },
@@ -17,7 +19,7 @@ export const starterCategories = [
   { id: '20000000-0000-4000-8000-000000000006', name: 'Software' },
   { id: '20000000-0000-4000-8000-000000000007', name: 'Utilities' },
 ] as const;
-export type BillingCycle = 'monthly' | 'yearly';
+export type BillingCycle = 'monthly' | 'yearly' | 'weekly';
 
 export interface BillingSchedule {
   readonly cycle: BillingCycle;
@@ -61,9 +63,19 @@ export interface Subscription {
   readonly lifecycle: SubscriptionLifecycle;
   readonly reminderLeadDaysOverride: number | null;
   readonly notificationsMuted: boolean;
+  /** Weekly Subscriptions only: render planned Skipped Weeks as ghost rows in Upcoming. */
+  readonly showSkippedWeeks: boolean;
   readonly archivedAt: UtcTimestamp | null;
   readonly createdAt: UtcTimestamp;
   readonly updatedAt: UtcTimestamp;
+}
+
+/** A user-planned suppression of one projected weekly Billing Occurrence. */
+export interface SkippedWeek {
+  readonly id: SkippedWeekId;
+  readonly subscriptionId: SubscriptionId;
+  readonly billingDate: CalendarDate;
+  readonly createdAt: UtcTimestamp;
 }
 
 export interface HouseholdList {
@@ -98,9 +110,39 @@ export interface ChargeException {
   readonly id: ChargeExceptionId;
   readonly billingOccurrenceId: BillingOccurrenceId;
   readonly reason: string | null;
+  /** At most one of the two generator links is non-null. */
+  readonly generatedByLifecycleEventId: LifecycleEventId | null;
+  readonly generatedBySkippedWeekId: SkippedWeekId | null;
   readonly createdAt: UtcTimestamp;
   readonly updatedAt: UtcTimestamp;
 }
+
+interface LifecycleEventBase {
+  readonly id: LifecycleEventId;
+  readonly subscriptionId: SubscriptionId;
+  readonly effectiveDate: CalendarDate;
+  readonly createdAt: UtcTimestamp;
+  readonly updatedAt: UtcTimestamp;
+}
+
+export type LifecycleEvent =
+  | (LifecycleEventBase & {
+      readonly kind: 'paused';
+      readonly pauseEndDate: CalendarDate | null;
+    })
+  | (LifecycleEventBase & {
+      readonly kind: 'resumed';
+      readonly nextBillingDate: CalendarDate;
+    })
+  | (LifecycleEventBase & {
+      readonly kind: 'canceled';
+      readonly accessEndDate: CalendarDate | null;
+    })
+  | (LifecycleEventBase & {
+      readonly kind: 'reactivated';
+      readonly nextBillingDate: CalendarDate;
+      readonly pricing: PricingArrangement;
+    });
 
 export interface PaymentMethod {
   readonly id: PaymentMethodId;
@@ -126,6 +168,8 @@ export interface HouseholdSnapshot {
   readonly billingOccurrences: readonly BillingOccurrence[];
   readonly payments: readonly Payment[];
   readonly chargeExceptions: readonly ChargeException[];
+  readonly lifecycleEvents: readonly LifecycleEvent[];
+  readonly skippedWeeks: readonly SkippedWeek[];
   readonly paymentMethods: readonly PaymentMethod[];
   readonly categories: readonly Category[];
 }

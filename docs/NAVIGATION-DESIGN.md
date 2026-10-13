@@ -11,7 +11,13 @@ Upcoming is the default tab and is organized around Billing Occurrences rather t
 3. Later This Month — the remainder of the rolling 30-day window.
 4. Later — the next Billing Occurrence beyond the window for every remaining Subscription.
 
-Selecting a charge opens its Billing Occurrence, where the user can Record Payment or record No Charge. The occurrence screen provides a secondary route to its Subscription. A History header action opens Recorded Spend totals and chronological Payment history.
+Selecting a charge opens its Billing Occurrence, where the user can Record Payment or record No Charge. The occurrence screen provides a secondary route to its Subscription. A History header action opens Recorded Spend analysis and unified Subscription Activity across Payments, Charge Exceptions, pauses, resumptions, cancellations, and reactivations; History remains a child route rather than a permanent tab.
+
+Charges on a Weekly Billing Cycle carry one reserved treatment inside these same groups: a leading edge stripe, a tinted monogram, and a WEEKLY chip in a green used for nothing else. When a weekly Subscription shows its Skipped Weeks, each skipped date in the rolling window renders as a dimmed ghost row with a struck-through amount and a one-tap Resume, contributing to no group sum and to no metric. Ghost rows never appear in Later, which always shows the next week that will actually bill. Touching and holding any weekly charge opens a context menu offering Skip this week and Plan weeks…, which is the fast path the feature is built around.
+
+## Week Planner
+
+The Week Planner is a child route presented as a form sheet, alongside the pause, resume, and cancellation sheets rather than as a tab or a step inside the Subscription editor. It lists the next eight projected weeks grouped by month, each toggled between Deliver and Skip, and applies every change immediately without a save step. It is reached from the Upcoming long-press menu, from a Plan Weeks action on an active weekly Subscription's detail screen, and from a link in the Subscription editor. Creation is the one exception: the add form pre-plans the first few weeks inline, because the Subscription does not exist yet.
 
 ## Subscriptions
 

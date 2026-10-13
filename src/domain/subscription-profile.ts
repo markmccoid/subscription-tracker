@@ -1,6 +1,11 @@
-import type { PaymentMethod, Subscription } from './model';
+import type { BillingCycle, PaymentMethod, Subscription } from './model';
 import { DomainValidationError, nonBlank, utcTimestamp } from './primitives';
 import { validatePricing, validateSchedule } from './recurrence';
+
+/** The Upcoming ghost-row preference defaults on for Weekly and is meaningless otherwise. */
+export function showSkippedWeeksFor(cycle: BillingCycle, requested: boolean | undefined): boolean {
+  return cycle === 'weekly' ? requested ?? true : false;
+}
 
 export function normalizeOptionalText(
   value: string | null | undefined,
@@ -88,7 +93,10 @@ export function setPaymentMethodRetired(
 
 export function updateStandardSubscription(
   current: Subscription,
-  input: Omit<Subscription, 'id' | 'householdListId' | 'lifecycle' | 'archivedAt' | 'createdAt' | 'updatedAt'>,
+  input: Omit<
+    Subscription,
+    'id' | 'householdListId' | 'lifecycle' | 'archivedAt' | 'createdAt' | 'updatedAt' | 'showSkippedWeeks'
+  > & { readonly showSkippedWeeks?: boolean },
   now: string,
 ): Subscription {
   if (current.archivedAt) {
@@ -108,6 +116,7 @@ export function updateStandardSubscription(
     pricing: validatePricing(input.schedule, input.pricing),
     reminderLeadDaysOverride: validateReminderLeadDays(input.reminderLeadDaysOverride),
     notificationsMuted: input.notificationsMuted,
+    showSkippedWeeks: showSkippedWeeksFor(input.schedule.cycle, input.showSkippedWeeks),
   };
 
   if (current.lifecycle.status === 'paused' && !sameSchedule(current, normalized)) {

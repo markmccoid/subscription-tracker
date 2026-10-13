@@ -209,8 +209,7 @@ export function SubscriptionsScreen() {
               </View>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
                 <Text selectable style={{ color: theme.textSecondary, fontSize: 13 }}>
-                  {item.category ?? "Uncategorized"} ·{" "}
-                  {item.cycle === "monthly" ? "Monthly" : "Yearly"}
+                  {item.category ?? "Uncategorized"} · {cycleLabel(item.cycle)}
                 </Text>
                 {item.nextBillingDate ? (
                   <Text selectable style={{ color: theme.textSecondary, fontSize: 13 }}>
@@ -277,6 +276,10 @@ function FilterRow<Value extends string>({
       })}
     </ScrollView>
   );
+}
+
+function cycleLabel(cycle: SubscriptionListItem["cycle"]): string {
+  return cycle === "monthly" ? "Monthly" : cycle === "yearly" ? "Yearly" : "Weekly";
 }
 
 function formatDate(value: string): string {

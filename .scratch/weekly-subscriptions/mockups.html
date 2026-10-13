@@ -1,0 +1,537 @@
+<title>Weekly Subscriptions — Design Proposal</title>
+<style>
+  :root{
+    --page:#F6F6F9; --ink:#1A1A24; --ink-2:#66666F; --card:#FFFFFF; --line:#E4E4EB;
+    --accent:#5856D6; --accent-soft:rgba(88,86,214,.11);
+    --weekly:#0E8A5F; --weekly-soft:rgba(14,138,95,.11);
+    --danger:#CF4444; --warm:#9A5700; --warm-soft:#FFF6E4;
+    --phone-bg:#F2F2F7; --phone-card:#FFFFFF; --phone-line:#E5E5EA; --bezel:#0E0E12;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --page:#101014; --ink:#ECECF2; --ink-2:#9B9BA7; --card:#18181F; --line:#2A2A33;
+      --accent:#7B79F2; --accent-soft:rgba(123,121,242,.16);
+      --weekly:#3ECF8E; --weekly-soft:rgba(62,207,142,.13);
+      --danger:#F27B7B; --warm:#FFBF69; --warm-soft:#352B1D;
+      --phone-bg:#000000; --phone-card:#1C1C1E; --phone-line:#2C2C2E; --bezel:#26262E;
+    }
+  }
+  :root[data-theme="dark"]{
+    --page:#101014; --ink:#ECECF2; --ink-2:#9B9BA7; --card:#18181F; --line:#2A2A33;
+    --accent:#7B79F2; --accent-soft:rgba(123,121,242,.16);
+    --weekly:#3ECF8E; --weekly-soft:rgba(62,207,142,.13);
+    --danger:#F27B7B; --warm:#FFBF69; --warm-soft:#352B1D;
+    --phone-bg:#000000; --phone-card:#1C1C1E; --phone-line:#2C2C2E; --bezel:#26262E;
+  }
+  :root[data-theme="light"]{
+    --page:#F6F6F9; --ink:#1A1A24; --ink-2:#66666F; --card:#FFFFFF; --line:#E4E4EB;
+    --accent:#5856D6; --accent-soft:rgba(88,86,214,.11);
+    --weekly:#0E8A5F; --weekly-soft:rgba(14,138,95,.11);
+    --danger:#CF4444; --warm:#9A5700; --warm-soft:#FFF6E4;
+    --phone-bg:#F2F2F7; --phone-card:#FFFFFF; --phone-line:#E5E5EA; --bezel:#0E0E12;
+  }
+
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    background:var(--page); color:var(--ink);
+    font-family:var(--sans); font-size:15px; line-height:1.55;
+    margin:0; padding:0 20px 80px;
+  }
+  main{max-width:1040px; margin:0 auto;}
+  h1,h2,h3{text-wrap:balance; margin:0;}
+  p{margin:0;}
+
+  /* ---------- header ---------- */
+  header.doc{padding:56px 0 20px; border-bottom:1px solid var(--line); margin-bottom:44px;}
+  .eyebrow{
+    font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent); margin-bottom:14px;
+  }
+  header.doc h1{font-size:clamp(28px,4.5vw,38px); font-weight:800; letter-spacing:-.02em; line-height:1.12;}
+  .lede{max-width:64ch; margin-top:14px; font-size:16px; color:var(--ink-2);}
+  .meta{margin-top:18px; font-size:12.5px; color:var(--ink-2); font-family:var(--mono);}
+  .meta b{color:var(--ink); font-weight:600;}
+
+  /* ---------- sections ---------- */
+  section{margin-bottom:64px;}
+  .sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:8px;}
+  .sec-head h2{font-size:22px; font-weight:800; letter-spacing:-.01em;}
+  .sec-kicker{font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-2);}
+  .sec-intro{max-width:66ch; color:var(--ink-2); margin-bottom:28px;}
+
+  .mock{display:grid; grid-template-columns:minmax(0,330px) minmax(0,1fr); gap:36px; align-items:start; margin-bottom:56px;}
+  @media (max-width:740px){ .mock{grid-template-columns:minmax(0,1fr);} }
+
+  /* ---------- phone ---------- */
+  .phone{
+    width:300px; max-width:100%; margin:0 auto;
+    border:9px solid var(--bezel); border-radius:44px;
+    background:var(--phone-bg); overflow:hidden;
+    box-shadow:0 24px 48px rgba(10,10,30,.16);
+  }
+  .screen{padding:10px 13px 22px; font-size:12px;}
+  .statusbar{display:flex; justify-content:space-between; align-items:center; padding:4px 10px 10px; font-size:11.5px; font-weight:700;}
+  .battery{width:20px; height:10px; border:1.4px solid currentColor; border-radius:3px; opacity:.75; position:relative;}
+  .battery::after{content:''; position:absolute; inset:1.5px 6px 1.5px 1.5px; background:currentColor; border-radius:1px;}
+  .navtitle{font-size:21px; font-weight:800; letter-spacing:-.02em; padding:2px 4px 12px;}
+  .navbar{display:flex; align-items:center; gap:6px; padding:0 2px 10px; font-size:13px;}
+  .navbar .back{color:var(--accent); font-weight:600;}
+  .navbar .navttl{flex:1; text-align:center; font-weight:700; margin-right:34px;}
+
+  .metriccard{
+    display:flex; border-radius:20px; padding:14px; margin-bottom:16px;
+    background:var(--accent); color:#fff;
+  }
+  .metric{flex:1; display:flex; flex-direction:column; gap:3px;}
+  .metric .ml{font-size:8.5px; font-weight:700; letter-spacing:.06em; opacity:.82;}
+  .metric .mv{font-size:16.5px; font-weight:800; font-variant-numeric:tabular-nums;}
+  .mdivider{width:1px; background:rgba(255,255,255,.35); margin:0 12px;}
+
+  .grouphead{display:flex; justify-content:space-between; align-items:baseline; padding:0 4px 6px;}
+  .grouphead .gt{font-size:9.5px; font-weight:700; letter-spacing:.08em; color:var(--ink-2);}
+  .grouphead .gsum{font-size:10px; font-weight:600; color:var(--ink-2); font-variant-numeric:tabular-nums;}
+  .rowgroup{border-radius:15px; overflow:hidden; background:var(--phone-card); border:1px solid var(--phone-line); margin-bottom:16px;}
+  .rowgroup.warmgroup{background:var(--warm-soft);}
+
+  .prow{display:flex; align-items:center; gap:9px; padding:10px 11px; position:relative;}
+  .prow + .prow{border-top:1px solid var(--phone-line);}
+  .prow.weeklyrow{box-shadow:inset 3px 0 0 var(--weekly);}
+  .mono-av{width:33px; height:33px; border-radius:11px; flex:none; display:flex; align-items:center; justify-content:center; font-size:10.5px; font-weight:800; background:var(--accent-soft); color:var(--accent);}
+  .mono-av.wk{background:var(--weekly-soft); color:var(--weekly);}
+  .mono-av.wm{background:var(--warm-soft); color:var(--warm);}
+  .rmain{flex:1; min-width:0; display:flex; flex-direction:column; gap:1px;}
+  .rname{font-size:12.5px; font-weight:700; display:flex; align-items:center; gap:5px; white-space:nowrap;}
+  .rsub{font-size:10px; color:var(--ink-2); white-space:nowrap;}
+  .rside{display:flex; flex-direction:column; align-items:flex-end; gap:3px; flex:none;}
+  .ramt{font-size:12.5px; font-weight:700; font-variant-numeric:tabular-nums;}
+  .chev{color:var(--ink-2); font-size:15px; font-weight:300; flex:none; opacity:.6;}
+
+  .chip{font-size:7.5px; font-weight:800; letter-spacing:.05em; padding:2px 5px; border-radius:6px; flex:none;}
+  .chip.wk{background:var(--weekly-soft); color:var(--weekly);}
+  .badge{font-size:8px; font-weight:800; letter-spacing:.03em; padding:2.5px 6px; border-radius:8px; font-variant-numeric:tabular-nums;}
+  .badge.warm{background:var(--warm-soft); color:var(--warm);}
+  .badge.hot{background:rgba(214,69,69,.14); color:var(--danger);}
+
+  .prow.skipped .rname,.prow.skipped .mono-av{opacity:.55;}
+  .prow.skipped{box-shadow:inset 3px 0 0 transparent; background:repeating-linear-gradient(-45deg,transparent 0 7px,var(--accent-soft) 7px 8px);}
+  .prow.skipped .ramt{color:var(--ink-2); text-decoration:line-through; font-weight:600;}
+  .pill-resume{font-size:8.5px; font-weight:800; color:var(--weekly); border:1.2px solid var(--weekly); padding:2.5px 8px; border-radius:9px;}
+
+  /* planner */
+  .plansub{font-size:10.5px; color:var(--ink-2); padding:0 4px 12px; margin-top:-8px;}
+  .monthlabel{font-size:9.5px; font-weight:700; letter-spacing:.08em; color:var(--ink-2); padding:2px 4px 6px;}
+  .wkrow{display:flex; align-items:center; gap:8px; padding:9.5px 11px;}
+  .wkrow + .wkrow{border-top:1px solid var(--phone-line);}
+  .wkdate{flex:1; min-width:0; display:flex; flex-direction:column; gap:1px;}
+  .wkdate .d1{font-size:12px; font-weight:700;}
+  .wkdate .d2{font-size:9.5px; color:var(--ink-2);}
+  .seg{display:flex; flex:none; background:var(--phone-bg); border-radius:9px; padding:2px; gap:2px;}
+  .seg span{font-size:9px; font-weight:700; padding:4px 9px; border-radius:7px; color:var(--ink-2);}
+  .seg .on{background:var(--weekly); color:#fff;}
+  .seg .off{background:var(--ink-2); color:var(--phone-card);}
+  .plantotal{border-radius:15px; background:var(--weekly-soft); color:var(--weekly); padding:11px 13px; font-size:11px; font-weight:700; display:flex; justify-content:space-between; font-variant-numeric:tabular-nums;}
+
+  /* form */
+  .sheethead{display:flex; align-items:center; padding:2px 4px 12px; font-size:12.5px;}
+  .sheethead .hcancel{color:var(--accent); flex:1;}
+  .sheethead .httl{font-weight:700; flex:1; text-align:center;}
+  .sheethead .hsave{color:var(--accent); font-weight:700; flex:1; text-align:right;}
+  .frow{display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10.5px 12px; font-size:12px;}
+  .frow + .frow{border-top:1px solid var(--phone-line);}
+  .flabel{font-weight:600;}
+  .fvalue{color:var(--ink-2); font-variant-numeric:tabular-nums;}
+  .fseg{display:flex; background:var(--phone-bg); border-radius:8px; padding:2px; gap:2px;}
+  .fseg span{font-size:9.5px; font-weight:600; padding:3.5px 8px; border-radius:6px; color:var(--ink-2);}
+  .fseg .sel{background:var(--phone-card); color:var(--ink); font-weight:700; box-shadow:0 1px 3px rgba(0,0,0,.14);}
+  .weekchips{display:flex; flex-wrap:wrap; gap:6px; padding:10px 12px;}
+  .wchip{display:flex; flex-direction:column; align-items:center; gap:2px; border-radius:10px; padding:6px 9px; font-size:9px; font-weight:700; border:1.2px solid var(--phone-line); color:var(--ink-2);}
+  .wchip .wd{font-size:10.5px;}
+  .wchip.on{background:var(--weekly-soft); border-color:var(--weekly); color:var(--weekly);}
+  .wchip.off .wd{text-decoration:line-through;}
+  .switch{width:34px; height:20px; border-radius:10px; background:var(--weekly); position:relative; flex:none;}
+  .switch::after{content:''; position:absolute; top:2px; right:2px; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25);}
+  .fhint{font-size:9.5px; color:var(--ink-2); padding:0 12px 10px;}
+
+  /* callout dots + annotations */
+  .dot{
+    position:absolute; z-index:2; width:17px; height:17px; border-radius:50%;
+    background:var(--accent); color:#fff; font-size:10px; font-weight:800;
+    display:flex; align-items:center; justify-content:center;
+    box-shadow:0 0 0 2.5px var(--page);
+  }
+  .notes{margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:14px;}
+  .notes>li{display:flex; gap:12px; max-width:58ch;}
+  .notes .n{
+    flex:none; width:20px; height:20px; border-radius:50%; margin-top:1px;
+    background:var(--accent); color:#fff; font-size:11px; font-weight:800;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .notes b{font-weight:700;}
+  .notes p{color:var(--ink-2); font-size:14px;}
+  .notes .lead-line{color:var(--ink); font-size:14.5px;}
+  .mock h3{font-size:16px; font-weight:800; margin-bottom:4px;}
+  .routepath{font-family:var(--mono); font-size:12px; color:var(--accent); margin-bottom:18px;}
+
+  /* data model */
+  .schema-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:16px; margin-bottom:26px;}
+  .scard{background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden;}
+  .scard .shead{padding:11px 16px; border-bottom:1px solid var(--line); font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-2);}
+  .scard .shead em{font-style:normal; color:var(--weekly);}
+  .scard pre{margin:0; padding:14px 16px; font-family:var(--mono); font-size:12px; line-height:1.65; overflow-x:auto; color:var(--ink);}
+  .scard .add{color:var(--weekly); font-weight:600;}
+  .scard .dim{color:var(--ink-2);}
+  .flow{display:flex; flex-wrap:wrap; gap:10px; align-items:stretch; margin-bottom:10px;}
+  .fstep{flex:1 1 180px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px;}
+  .fstep .ft{font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); margin-bottom:4px;}
+  .fstep.green .ft{color:var(--weekly);}
+  .fstep p{font-size:13px; color:var(--ink-2);}
+  .flownote{font-size:13px; color:var(--ink-2); max-width:70ch;}
+
+  /* decisions */
+  .decisions{display:flex; flex-direction:column; gap:16px;}
+  .dec{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; max-width:76ch;}
+  .dec h3{font-size:14.5px; font-weight:800; margin-bottom:4px;}
+  .dec p{font-size:13.5px; color:var(--ink-2);}
+  .dec .rec{color:var(--weekly); font-weight:700;}
+
+  footer.doc{border-top:1px solid var(--line); margin-top:24px; padding-top:20px; font-size:12.5px; color:var(--ink-2); font-family:var(--mono);}
+
+  @media (prefers-reduced-motion: no-preference){
+    .phone{transition:transform .25s ease;}
+    .phone:hover{transform:translateY(-3px);}
+  }
+</style>
+
+<main>
+<header class="doc">
+  <p class="eyebrow">Subscription Tracker · Feature Proposal</p>
+  <h1>Weekly subscriptions, built for meal kits</h1>
+  <p class="lede">A third Billing Cycle where the unit of decision is the week. The user plans deliveries by toggling individual weeks between <b>Deliver</b> and <b>Skip</b> — at creation, from the subscription, and straight from Upcoming — without touching the pause/resume lifecycle machinery.</p>
+  <p class="meta">Spec: <b>.scratch/weekly-subscriptions/spec.md</b> · Mock dates assume today = Tue, Aug 11 2026 · HelloFresh $64.99, delivered Fridays</p>
+</header>
+
+<!-- ═══════════════════ SECTION 1: UPCOMING ═══════════════════ -->
+<section>
+  <div class="sec-head"><span class="sec-kicker">Surface 1</span><h2>Upcoming — weekly charges stand out, skips stay visible</h2></div>
+  <p class="sec-intro">Weekly occurrences flow into the existing groups (Next 7 Days, Later This Month) — no new sections. A green edge stripe plus a WEEKLY chip make meal-kit rows scannable, and skipped weeks render as ghost rows when the subscription opts in.</p>
+
+  <div class="mock">
+    <div class="phone"><div class="screen">
+      <div class="statusbar"><span>9:41</span><span class="battery"></span></div>
+      <div class="navtitle">Upcoming</div>
+      <div class="metriccard">
+        <div class="metric"><span class="ml">MONTHLY COMMITMENT</span><span class="mv">$324.28</span></div>
+        <div class="mdivider"></div>
+        <div class="metric"><span class="ml">NEXT 30 DAYS</span><span class="mv">$232.44</span></div>
+      </div>
+
+      <div class="grouphead"><span class="gt">NEXT 7 DAYS</span><span class="gsum">$80.48</span></div>
+      <div class="rowgroup warmgroup">
+        <div class="prow weeklyrow">
+          <span class="dot" style="top:5px; right:5px;">1</span>
+          <div class="mono-av wk">HF</div>
+          <div class="rmain">
+            <span class="rname">HelloFresh <span class="chip wk">WEEKLY</span></span>
+            <span class="rsub">Fri, Aug 14 · Delivery week</span>
+          </div>
+          <div class="rside"><span class="ramt">$64.99</span><span class="badge hot">3 DAYS</span></div>
+          <span class="chev">›</span>
+        </div>
+        <div class="prow">
+          <div class="mono-av wm">NE</div>
+          <div class="rmain"><span class="rname">Netflix</span><span class="rsub">Sat, Aug 15</span></div>
+          <div class="rside"><span class="ramt">$15.49</span><span class="badge warm">4 DAYS</span></div>
+          <span class="chev">›</span>
+        </div>
+      </div>
+
+      <div class="grouphead"><span class="gt">LATER THIS MONTH</span><span class="gsum">$151.96</span></div>
+      <div class="rowgroup">
+        <div class="prow skipped">
+          <span class="dot" style="top:5px; right:5px;">2</span>
+          <div class="mono-av wk">HF</div>
+          <div class="rmain">
+            <span class="rname">HelloFresh</span>
+            <span class="rsub">Fri, Aug 21 · Skipped week</span>
+          </div>
+          <div class="rside"><span class="ramt">$64.99</span><span class="pill-resume">RESUME</span></div>
+        </div>
+        <div class="prow weeklyrow">
+          <div class="mono-av wk">HF</div>
+          <div class="rmain">
+            <span class="rname">HelloFresh <span class="chip wk">WEEKLY</span></span>
+            <span class="rsub">Fri, Aug 28 · Delivery week</span>
+          </div>
+          <div class="rside"><span class="ramt">$64.99</span></div>
+          <span class="chev">›</span>
+        </div>
+        <div class="prow">
+          <span class="dot" style="top:5px; right:5px;">4</span>
+          <div class="mono-av">SP</div>
+          <div class="rmain"><span class="rname">Spotify</span><span class="rsub">Sun, Aug 30</span></div>
+          <div class="rside"><span class="ramt">$11.99</span></div>
+          <span class="chev">›</span>
+        </div>
+      </div>
+    </div></div>
+
+    <div>
+      <h3>The Upcoming tab</h3>
+      <p class="routepath">src/app/(tabs)/(index)/index.tsx · existing screen, extended</p>
+      <ol class="notes">
+        <li><span class="n">1</span><div>
+          <p class="lead-line"><b>Weekly rows get one reserved treatment.</b></p>
+          <p>A 3&#8202;px green edge stripe, green monogram, and a WEEKLY chip — green is used for nothing else in the app, so meal kits pop without shouting. Grouping, sorting, and tap-through to the Billing Occurrence are unchanged.</p>
+        </div></li>
+        <li><span class="n">2</span><div>
+          <p class="lead-line"><b>Skipped weeks appear as ghost rows.</b></p>
+          <p>Hatched background, dimmed name, struck-through amount, no chevron. Shown only when the subscription's "Show skipped weeks in Upcoming" setting is on. Tapping <b>Resume</b> unskips that week in place — one tap, no navigation.</p>
+        </div></li>
+        <li><span class="n">3</span><div>
+          <p class="lead-line"><b>Long-press any HelloFresh row → Week Planner.</b></p>
+          <p>A context menu (Skip this week / Plan weeks…) gives the fast path the feature is really about. Swiping is reserved; the nav design keeps rows tap-first.</p>
+        </div></li>
+        <li><span class="n">4</span><div>
+          <p class="lead-line"><b>Totals count only weeks that will bill.</b></p>
+          <p>Group sums and "Next 30 Days" exclude skipped weeks ($232.44 counts 3 of 4 HelloFresh Fridays). Monthly Commitment stays a normalized ceiling: weekly amount × 52 ⁄ 12.</p>
+        </div></li>
+      </ol>
+    </div>
+  </div>
+
+<!-- ═══════════════════ SECTION 2: WEEK PLANNER ═══════════════════ -->
+  <div class="sec-head"><span class="sec-kicker">Surface 2</span><h2>Week Planner — the power surface</h2></div>
+  <p class="sec-intro">One screen, one job: the next eight delivery weeks as a tap-to-toggle list. Reached from the subscription detail, from long-press on Upcoming, and offered inline at creation.</p>
+
+  <div class="mock">
+    <div class="phone"><div class="screen">
+      <div class="statusbar"><span>9:41</span><span class="battery"></span></div>
+      <div class="navbar"><span class="back">‹ HelloFresh</span></div>
+      <div class="navtitle">Week Planner</div>
+      <p class="plansub">Delivers Fridays · $64.99 per week</p>
+
+      <div class="monthlabel">AUGUST</div>
+      <div class="rowgroup">
+        <div class="wkrow">
+          <span style="position:relative"><span class="dot" style="top:-4px; left:-16px;">1</span></span>
+          <div class="wkdate"><span class="d1">Fri, Aug 14</span><span class="d2">In 3 days · reminder Tue</span></div>
+          <div class="seg"><span class="on">Deliver</span><span>Skip</span></div>
+        </div>
+        <div class="wkrow">
+          <div class="wkdate"><span class="d1">Fri, Aug 21</span><span class="d2">Skipped · no charge</span></div>
+          <div class="seg"><span>Deliver</span><span class="off">Skip</span></div>
+        </div>
+        <div class="wkrow">
+          <div class="wkdate"><span class="d1">Fri, Aug 28</span></div>
+          <div class="seg"><span class="on">Deliver</span><span>Skip</span></div>
+        </div>
+      </div>
+
+      <div class="monthlabel">SEPTEMBER</div>
+      <div class="rowgroup">
+        <div class="wkrow">
+          <div class="wkdate"><span class="d1">Fri, Sep 4</span></div>
+          <div class="seg"><span class="on">Deliver</span><span>Skip</span></div>
+        </div>
+        <div class="wkrow">
+          <div class="wkdate"><span class="d1">Fri, Sep 11</span><span class="d2">Skipped · no charge</span></div>
+          <div class="seg"><span>Deliver</span><span class="off">Skip</span></div>
+        </div>
+        <div class="wkrow">
+          <div class="wkdate"><span class="d1">Fri, Sep 18</span></div>
+          <div class="seg"><span class="on">Deliver</span><span>Skip</span></div>
+        </div>
+        <div class="wkrow">
+          <div class="wkdate"><span class="d1">Fri, Sep 25</span></div>
+          <div class="seg"><span class="on">Deliver</span><span>Skip</span></div>
+        </div>
+      </div>
+
+      <div class="plantotal">
+        <span style="position:relative"><span class="dot" style="top:-22px; left:-4px;">3</span>Next 30 days</span>
+        <span>3 deliveries · $194.97</span>
+      </div>
+    </div></div>
+
+    <div>
+      <h3>Plan Weeks</h3>
+      <p class="routepath">src/app/plan-weeks/[id].tsx · new modal route (form-sheet, like pause/resume)</p>
+      <ol class="notes">
+        <li><span class="n">1</span><div>
+          <p class="lead-line"><b>Each row is a projected weekly Billing Occurrence.</b></p>
+          <p>Dates come straight from the schedule (start date + 7·n); nothing is stored per-week until the user skips one. Toggling writes or deletes a single Skipped Week record and saves immediately — no Save button.</p>
+        </div></li>
+        <li><span class="n">2</span><div>
+          <p class="lead-line"><b>Only future weeks toggle.</b></p>
+          <p>Once a Friday passes it leaves the planner: a delivered week becomes a normal Billing Occurrence awaiting payment; a skipped one materializes with a Generated Charge Exception ("Skipped week"), so it never lands in Action Needed.</p>
+        </div></li>
+        <li><span class="n">3</span><div>
+          <p class="lead-line"><b>A live footer shows the money consequence.</b></p>
+          <p>Toggling Aug 21 back on flips this to "4 deliveries · $259.96" instantly — the decide-what-to-keep feedback loop the app is for.</p>
+        </div></li>
+      </ol>
+    </div>
+  </div>
+
+<!-- ═══════════════════ SECTION 3: ADD FORM ═══════════════════ -->
+  <div class="sec-head"><span class="sec-kicker">Surface 3</span><h2>Creation — Weekly joins the cycle picker</h2></div>
+  <p class="sec-intro">The existing add/edit form sheet grows one segment and, when Weekly is chosen, two weekly-only groups: a first-weeks strip and the skipped-weeks visibility toggle.</p>
+
+  <div class="mock">
+    <div class="phone"><div class="screen">
+      <div class="statusbar"><span>9:41</span><span class="battery"></span></div>
+      <div class="sheethead"><span class="hcancel">Cancel</span><span class="httl">Add Subscription</span><span class="hsave">Save</span></div>
+
+      <div class="rowgroup">
+        <div class="frow"><span class="flabel">Name</span><span class="fvalue">HelloFresh</span></div>
+        <div class="frow"><span class="flabel">Amount</span><span class="fvalue">$64.99</span></div>
+        <div class="frow"><span class="flabel">Category</span><span class="fvalue">Other ›</span></div>
+      </div>
+
+      <div class="grouphead"><span class="gt">SCHEDULE</span></div>
+      <div class="rowgroup">
+        <div class="frow" style="position:relative">
+          <span class="dot" style="top:8px; left:-8px;">1</span>
+          <span class="flabel">Billing Cycle</span>
+          <div class="fseg"><span>Monthly</span><span>Yearly</span><span class="sel">Weekly</span></div>
+        </div>
+        <div class="frow"><span class="flabel">First Billing Date</span><span class="fvalue">Fri, Aug 14, 2026</span></div>
+      </div>
+      <p class="fhint">Bills every Friday, projected from the first date.</p>
+
+      <div class="grouphead"><span class="gt">PLAN THE FIRST WEEKS</span></div>
+      <div class="rowgroup" style="position:relative">
+        <span class="dot" style="top:-6px; right:-6px;">2</span>
+        <div class="weekchips">
+          <div class="wchip on"><span class="wd">Aug 14</span><span>Deliver</span></div>
+          <div class="wchip off"><span class="wd">Aug 21</span><span>Skip</span></div>
+          <div class="wchip on"><span class="wd">Aug 28</span><span>Deliver</span></div>
+          <div class="wchip on"><span class="wd">Sep 4</span><span>Deliver</span></div>
+        </div>
+      </div>
+
+      <div class="rowgroup" style="position:relative">
+        <span class="dot" style="top:-6px; right:-6px;">3</span>
+        <div class="frow"><span class="flabel">Show skipped weeks in Upcoming</span><span class="switch"></span></div>
+      </div>
+      <p class="fhint">Skipped weeks appear dimmed so you can resume them with one tap.</p>
+    </div></div>
+
+    <div>
+      <h3>Add Subscription, weekly variant</h3>
+      <p class="routepath">src/features/subscriptions/subscription-form-screen.tsx · existing form, extended</p>
+      <ol class="notes">
+        <li><span class="n">1</span><div>
+          <p class="lead-line"><b>Weekly is a third segment, not a new form.</b></p>
+          <p>Name, amount, category, payment method, and reminders are untouched. Choosing Weekly relabels the date row "First Billing Date" and the weekday is derived from it — there is no separate anchor field to explain.</p>
+        </div></li>
+        <li><span class="n">2</span><div>
+          <p class="lead-line"><b>Seed the first four weeks at creation.</b></p>
+          <p>All weeks default to Deliver; tapping a chip flips it. On save, skipped chips become Skipped Week records. It's a convenience preview of the Week Planner, not a separate mechanism.</p>
+        </div></li>
+        <li><span class="n">3</span><div>
+          <p class="lead-line"><b>Skip visibility is a per-subscription choice.</b></p>
+          <p>Stored on the subscription (default on for weekly), editable later. It only affects Upcoming's ghost rows — the Week Planner always shows every week.</p>
+        </div></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════ SECTION 4: DATA MODEL ═══════════════════ -->
+<section>
+  <div class="sec-head"><span class="sec-kicker">Backend</span><h2>How it lands in the data model</h2></div>
+  <p class="sec-intro">The core insight: a skipped week is <b>not</b> a pause. Pausing is a lifecycle state with events and history semantics; skipping is a per-occurrence plan. One new table plus one new cycle value covers the whole feature — projections stay pure, history stays append-only.</p>
+
+  <div class="schema-grid">
+    <div class="scard">
+      <div class="shead">domain/model.ts <em>· extended</em></div>
+      <pre><span class="dim">export type BillingCycle =</span>
+<span class="dim">  | 'monthly' | 'yearly'</span>
+<span class="add">  | 'weekly';   // + cycle</span>
+
+<span class="dim">interface Subscription {</span>
+<span class="dim">  ...</span>
+<span class="add">  showSkippedWeeks: boolean;</span>
+<span class="dim">}</span>
+
+<span class="add">interface SkippedWeek {</span>
+<span class="add">  id: SkippedWeekId;</span>
+<span class="add">  subscriptionId: SubscriptionId;</span>
+<span class="add">  billingDate: CalendarDate;</span>
+<span class="add">  createdAt: UtcTimestamp;</span>
+<span class="add">}</span></pre>
+    </div>
+    <div class="scard">
+      <div class="shead">sqlite schema <em>· v7 migration</em></div>
+      <pre><span class="add">CREATE TABLE skipped_weeks (</span>
+<span class="add">  id TEXT PRIMARY KEY,</span>
+<span class="add">  subscription_id TEXT NOT NULL</span>
+<span class="add">    REFERENCES subscriptions(id)</span>
+<span class="add">    ON DELETE CASCADE,</span>
+<span class="add">  billing_date TEXT NOT NULL,</span>
+<span class="add">  created_at TEXT NOT NULL,</span>
+<span class="add">  UNIQUE (subscription_id,</span>
+<span class="add">          billing_date)</span>
+<span class="add">);</span>
+
+<span class="dim">-- billing_cycle CHECK gains</span>
+<span class="dim">-- 'weekly' (table rebuild);</span>
+<span class="dim">-- + show_skipped_weeks col;</span>
+<span class="dim">-- + charge_exceptions.</span>
+<span class="dim">--   generated_by_skipped_week_id</span></pre>
+    </div>
+    <div class="scard">
+      <div class="shead">domain/recurrence.ts <em>· one new arm</em></div>
+      <pre><span class="dim">occurrenceAt(schedule, i):</span>
+<span class="add">  if cycle === 'weekly'</span>
+<span class="add">    return startDate + 7·i days</span>
+<span class="dim">  // anchorDay unused for weekly;</span>
+<span class="dim">  // weekday derives from startDate</span>
+
+<span class="dim">monthlyCommitment +=</span>
+<span class="add">  cycle === 'weekly'</span>
+<span class="add">    ? round(amount × 52 / 12)</span>
+<span class="dim">    : ...existing arms</span></pre>
+    </div>
+  </div>
+
+  <h3 style="font-size:16px; margin-bottom:12px;">Lifecycle of a skipped week</h3>
+  <div class="flow">
+    <div class="fstep green"><div class="ft">1 · Planned</div><p>User taps Skip. A <b>Skipped Week</b> row is stored for that projected billing date. Upcoming hides or ghosts it; totals drop.</p></div>
+    <div class="fstep green"><div class="ft">2 · Changed mind</div><p>Tapping Deliver (or Resume on the ghost row) deletes the row. The projection instantly includes the week again. Nothing else to reconcile.</p></div>
+    <div class="fstep"><div class="ft">3 · Date passes</div><p>On next initialize, the skipped date materializes as a Billing Occurrence with a <b>Generated Charge Exception</b> ("Skipped week") linked to the Skipped Week record — mirroring how cancellation resolves unbilled history (ADR-0003, ADR-0004).</p></div>
+    <div class="fstep"><div class="ft">4 · History</div><p>The exception shows in Subscription Activity as "Not charged · Skipped week." Recorded Spend is untouched; Action Needed never nags about a week you chose to skip.</p></div>
+  </div>
+  <p class="flownote">Reminders reuse the existing pipeline: the Billing Reminder targets the <b>next unskipped</b> occurrence, and any toggle flags reminder reconciliation exactly like pause/resume does today. Duplicate detection extends unchanged — same name, amount, cycle, and a next date within three days.</p>
+</section>
+
+<!-- ═══════════════════ SECTION 5: DECISIONS ═══════════════════ -->
+<section>
+  <div class="sec-head"><span class="sec-kicker">To confirm</span><h2>Open decisions</h2></div>
+  <div class="decisions">
+    <div class="dec">
+      <h3>Monthly Commitment for weekly subscriptions</h3>
+      <p>Normalize at 52 ⁄ 12 (≈ 4.33 weeks ⁄ month) regardless of skips, keeping it a stable ceiling like today's definition — or count planned deliveries, which makes it jump week to week. <span class="rec">Recommend 52 ⁄ 12</span>; skips already show up in "Next 30 Days."</p>
+    </div>
+    <div class="dec">
+      <h3>Default for "Show skipped weeks in Upcoming"</h3>
+      <p>On keeps the resume affordance discoverable where the user already lives; off keeps Upcoming strictly "money leaving." <span class="rec">Recommend on by default for weekly subs</span>, per-subscription override at creation and in edit.</p>
+    </div>
+    <div class="dec">
+      <h3>Can a past week's skip be undone?</h3>
+      <p>Deleting the Skipped Week after materialization would cascade its Generated Charge Exception and surface the week in Action Needed. <span class="rec">Recommend no</span> — correct history via the Billing Occurrence (record a payment over the exception) instead of editing the plan retroactively.</p>
+    </div>
+    <div class="dec">
+      <h3>Pause still applies to weekly subscriptions</h3>
+      <p>Skipping covers week-to-week choices; a long vacation or account freeze is still a proper Pause with its Lifecycle Event. The Week Planner hides while paused. No change proposed — flagging so the two mechanisms stay distinct in the docs.</p>
+    </div>
+  </div>
+</section>
+
+<footer class="doc">
+  Weekly Subscriptions proposal · full spec at .scratch/weekly-subscriptions/spec.md · glossary additions: Weekly Billing Cycle, Skipped Week, Week Planner
+</footer>
+</main>

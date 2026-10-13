@@ -1,5 +1,6 @@
 import type { BillingSchedule, PricingArrangement } from './model';
 import {
+  addCalendarDays,
   calendarParts,
   compareCalendarDates,
   daysInMonth,
@@ -9,10 +10,26 @@ import {
   DomainValidationError,
 } from './primitives';
 
+/**
+ * Weekly schedules recur on the Billing Schedule Start Date's weekday, so their stored Billing
+ * Anchor Day is the start date's day of month by convention and is otherwise ignored.
+ */
+export function anchorDayFor(
+  cycle: BillingSchedule['cycle'],
+  startDate: CalendarDate,
+  requested?: number,
+): number {
+  if (cycle === 'weekly') return calendarParts(startDate).day;
+  return requested ?? calendarParts(startDate).day;
+}
+
 export function validateSchedule(schedule: BillingSchedule): BillingSchedule {
   if (!Number.isInteger(schedule.anchorDay) || schedule.anchorDay < 1 || schedule.anchorDay > 31) {
     throw new DomainValidationError('Billing Anchor Day must be an integer from 1 through 31.');
   }
+  // Weekly schedules recur on the Billing Schedule Start Date's weekday, so Billing Anchor Day
+  // does not apply; callers store the start date's day of month by convention.
+  if (schedule.cycle === 'weekly') return schedule;
   const { year, month, day } = calendarParts(schedule.startDate);
   const expectedStartDay = Math.min(schedule.anchorDay, daysInMonth(year, month));
   if (day !== expectedStartDay) {
@@ -27,6 +44,9 @@ export function occurrenceAt(schedule: BillingSchedule, index: number): Calendar
   validateSchedule(schedule);
   if (!Number.isInteger(index) || index < 0) {
     throw new DomainValidationError('Occurrence index must be a non-negative integer.');
+  }
+  if (schedule.cycle === 'weekly') {
+    return addCalendarDays(schedule.startDate, 7 * index);
   }
   const start = calendarParts(schedule.startDate);
   if (schedule.cycle === 'monthly') {
@@ -43,6 +63,13 @@ export function occurrenceAt(schedule: BillingSchedule, index: number): Calendar
   );
 }
 
+/** Roughly two hundred years of projection for every cycle. */
+const occurrenceHardLimit: Record<BillingSchedule['cycle'], number> = {
+  monthly: 2400,
+  yearly: 400,
+  weekly: 10440,
+};
+
 export function occurrencesInRange(
   schedule: BillingSchedule,
   fromInclusive: CalendarDate,
@@ -50,7 +77,7 @@ export function occurrencesInRange(
 ): readonly CalendarDate[] {
   if (compareCalendarDates(fromInclusive, toInclusive) > 0) return [];
   const result: CalendarDate[] = [];
-  const hardLimit = schedule.cycle === 'monthly' ? 2400 : 400;
+  const hardLimit = occurrenceHardLimit[schedule.cycle];
   for (let index = 0; index < hardLimit; index += 1) {
     const date = occurrenceAt(schedule, index);
     if (compareCalendarDates(date, toInclusive) > 0) break;
@@ -63,10 +90,13 @@ export function nextOccurrenceOnOrAfter(
   schedule: BillingSchedule,
   date: CalendarDate,
 ): CalendarDate {
-  const searchEnd = formatCalendarDate(calendarParts(date).year + 200, 12, 31);
-  const [next] = occurrencesInRange(schedule, date, searchEnd);
-  if (!next) throw new DomainValidationError('Could not project the next Billing Occurrence.');
-  return next;
+  validateSchedule(schedule);
+  const hardLimit = occurrenceHardLimit[schedule.cycle];
+  for (let index = 0; index < hardLimit; index += 1) {
+    const candidate = occurrenceAt(schedule, index);
+    if (compareCalendarDates(candidate, date) >= 0) return candidate;
+  }
+  throw new DomainValidationError('Could not project the next Billing Occurrence.');
 }
 
 export function amountForOccurrence(

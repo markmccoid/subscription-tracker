@@ -48,6 +48,61 @@ test('range projection includes every elapsed occurrence', () => {
   ]);
 });
 
+test('a weekly schedule steps seven days across month and year boundaries', () => {
+  const schedule = {
+    cycle: 'weekly',
+    startDate: calendarDate('2026-12-25'),
+    anchorDay: 25,
+  };
+
+  assert.equal(occurrenceAt(schedule, 1), '2027-01-01');
+  assert.equal(occurrenceAt(schedule, 2), '2027-01-08');
+  assert.deepEqual(occurrencesInRange(schedule, calendarDate('2026-12-25'), calendarDate('2027-01-15')), [
+    '2026-12-25',
+    '2027-01-01',
+    '2027-01-08',
+    '2027-01-15',
+  ]);
+});
+
+test('weekly projection stops at its two-hundred-year hard limit', () => {
+  const schedule = {
+    cycle: 'weekly',
+    startDate: calendarDate('2026-08-14'),
+    anchorDay: 14,
+  };
+
+  const projected = occurrencesInRange(schedule, calendarDate('2026-08-14'), calendarDate('2400-01-01'));
+  assert.equal(projected.length, 10440);
+});
+
+test('a weekly start date needs no Billing Anchor Day agreement', () => {
+  assert.doesNotThrow(() =>
+    validateSchedule({
+      cycle: 'weekly',
+      startDate: calendarDate('2026-08-14'),
+      anchorDay: 31,
+    }),
+  );
+  assert.throws(
+    () =>
+      validateSchedule({
+        cycle: 'weekly',
+        startDate: calendarDate('2026-08-14'),
+        anchorDay: 32,
+      }),
+    /1 through 31/,
+  );
+  // The agreement check still applies to the dated cycles.
+  assert.throws(() =>
+    validateSchedule({
+      cycle: 'monthly',
+      startDate: calendarDate('2026-08-14'),
+      anchorDay: 15,
+    }),
+  );
+});
+
 test('promotion switches amount on its first standard Billing Date', () => {
   const pricing = {
     kind: 'promotion',
